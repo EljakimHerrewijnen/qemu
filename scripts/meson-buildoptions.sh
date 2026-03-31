@@ -199,6 +199,7 @@ meson_options_help() {
   printf "%s\n" '  tpm             TPM support'
   printf "%s\n" '  u2f             U2F emulation support'
   printf "%s\n" '  uadk            UADK Library support'
+  printf "%s\n" '  unicorn         Unicorn-like embedding backend'
   printf "%s\n" '  usb-redir       libusbredir support'
   printf "%s\n" '  valgrind        valgrind debug support for coroutine stacks'
   printf "%s\n" '  vde             vde network backend support'
@@ -532,6 +533,8 @@ _meson_option_parse() {
     --disable-uadk) printf "%s" -Duadk=disabled ;;
     --enable-ubsan) printf "%s" -Dubsan=true ;;
     --disable-ubsan) printf "%s" -Dubsan=false ;;
+    --enable-unicorn) printf "%s" -Dunicorn=enabled ;;
+    --disable-unicorn) printf "%s" -Dunicorn=disabled ;;
     --enable-usb-redir) printf "%s" -Dusb_redir=enabled ;;
     --disable-usb-redir) printf "%s" -Dusb_redir=disabled ;;
     --enable-valgrind) printf "%s" -Dvalgrind=enabled ;;
