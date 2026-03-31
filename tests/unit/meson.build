@@ -157,6 +157,9 @@ if have_system
     }
   endif
   tests += {'test-qdev': [qom, hwcore]}
+  if have_tcg and get_option('unicorn').allowed()
+    tests += {'test-unicorn-backend-api': []}
+  endif
 endif
 
 if have_ga and host_os == 'linux'

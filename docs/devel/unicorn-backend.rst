@@ -224,6 +224,24 @@ Phase 5: architecture polish
 Only after the backend skeleton works should target-specific register
 access helpers or architecture-specific convenience APIs be added.
 
+Phase 6: Python API parity
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+After the C backend is stable, add a Python package that mirrors the
+capabilities of Unicorn's Python API on top of the in-tree backend. That
+phase should:
+
+* live under ``python/qemu/unicorn/`` so it can reuse QEMU's existing
+  Python packaging layout;
+* wrap the phase-1 C API first, and only add higher-level Python helpers
+  once the low-level surface is stable;
+* expose the same core concepts users expect from Unicorn's Python API:
+  emulator construction, memory map/read/write, register access, bounded
+  execution, and hook registration;
+* provide compatibility shims for Unicorn-style constants and exception
+  types so Python users can port code incrementally rather than
+  rewriting everything around QEMU-specific types.
+
 Files to study while implementing
 ---------------------------------
 
