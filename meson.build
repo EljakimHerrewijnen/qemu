@@ -927,6 +927,10 @@ if have_tcg
   accelerators += 'CONFIG_TCG'
 endif
 
+if get_option('unicorn').enabled() and not have_tcg
+  error('The unicorn backend requires TCG support')
+endif
+
 if 'CONFIG_KVM' not in accelerators and get_option('kvm').enabled()
   error('KVM not available on this platform')
 endif
