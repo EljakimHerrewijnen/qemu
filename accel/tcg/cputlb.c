@@ -41,6 +41,7 @@
 #include "exec/tlb-flags.h"
 #include "qemu/atomic.h"
 #include "qemu/atomic128.h"
+#include "system/hedgehog-exec-hooks.h"
 #include "tb-internal.h"
 #include "trace.h"
 #include "tb-hash.h"
@@ -1291,6 +1292,8 @@ static void io_failed(CPUState *cpu, CPUTLBEntryFull *full, vaddr addr,
                       unsigned size, MMUAccessType access_type, int mmu_idx,
                       MemTxResult response, uintptr_t retaddr)
 {
+    hedgehog_exec_hook_invalid(cpu, addr, size, access_type, response);
+
     if (!cpu->ignore_memory_transaction_failures
         && cpu->cc->tcg_ops->do_transaction_failed) {
         hwaddr physaddr = full->phys_addr | (addr & ~TARGET_PAGE_MASK);
@@ -1376,6 +1379,8 @@ static int probe_access_internal(CPUState *cpu, vaddr addr,
             if (!tlb_fill_align(cpu, addr, access_type, mmu_idx,
                                 0, fault_size, nonfault, retaddr)) {
                 /* Non-faulting page table read failed.  */
+                hedgehog_exec_hook_invalid(cpu, addr, fault_size,
+                                          access_type, MEMTX_DECODE_ERROR);
                 *phost = NULL;
                 *pfull = NULL;
                 return TLB_INVALID_MASK;

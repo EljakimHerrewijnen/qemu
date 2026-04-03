@@ -10,6 +10,7 @@ add_project_arguments(cc.get_supported_arguments('-Wsign-compare',
 
 libvduse = static_library('vduse',
                           files('libvduse.c'),
+                          pic: true,
                           c_args: '-D_GNU_SOURCE')
 
 libvduse_dep = declare_dependency(link_with: libvduse,

@@ -39,6 +39,7 @@
 #include "exec/icount.h"
 #include "exec/replay-core.h"
 #include "system/tcg.h"
+#include "system/hedgehog-exec-hooks.h"
 #include "exec/helper-proto-common.h"
 #include "tcg-accel-ops.h"
 #include "tb-jmp-cache.h"
@@ -885,6 +886,22 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
                                     vaddr pc, TranslationBlock **last_tb,
                                     int *tb_exit)
 {
+    if (hedgehog_exec_hook_tb_enter(cpu, pc)) {
+        *last_tb = NULL;
+        *tb_exit = TB_EXIT_REQUESTED;
+        return;
+    }
+
+    /*
+     * In single-step mode each TB is one guest instruction, which lets
+     * hedgehog backends expose instruction callbacks without translator edits.
+     */
+    if (cpu->singlestep_enabled && hedgehog_exec_hook_insn(cpu, pc)) {
+        *last_tb = NULL;
+        *tb_exit = TB_EXIT_REQUESTED;
+        return;
+    }
+
     trace_exec_tb(tb, pc);
     tb = cpu_tb_exec(cpu, tb, tb_exit);
     if (*tb_exit != TB_EXIT_REQUESTED) {

@@ -157,8 +157,8 @@ if have_system
     }
   endif
   tests += {'test-qdev': [qom, hwcore]}
-  if have_tcg and get_option('unicorn').allowed()
-    tests += {'test-unicorn-backend-api': []}
+  if have_tcg and get_option('hedgehog').allowed()
+    tests += {'test-hedgehog-backend-api': []}
   endif
 endif
 

@@ -13,6 +13,7 @@ glib = dependency('glib-2.0')
 
 vhost_user = static_library('vhost-user',
                             files('libvhost-user.c'),
+                            pic: true,
                             dependencies: threads,
                             c_args: '-D_GNU_SOURCE')
 
@@ -21,6 +22,7 @@ executable('link-test', files('link-test.c'),
 
 vhost_user_glib = static_library('vhost-user-glib',
                                  files('libvhost-user-glib.c'),
+                                 pic: true,
                                  link_with: vhost_user,
                                  dependencies: glib)
 

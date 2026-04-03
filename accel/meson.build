@@ -8,8 +8,8 @@ if have_system
   subdir('hvf')
   subdir('whpx')
   subdir('qtest')
-  if have_tcg and get_option('unicorn').allowed()
-    subdir('unicorn')
+  if have_tcg and get_option('hedgehog').allowed()
+    subdir('hedgehog')
   endif
   subdir('kvm')
   subdir('xen')

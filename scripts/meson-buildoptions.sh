@@ -127,6 +127,7 @@ meson_options_help() {
   printf "%s\n" '  gtk-clipboard   clipboard support for the gtk UI (EXPERIMENTAL, MAY HANG)'
   printf "%s\n" '  guest-agent     Build QEMU Guest Agent'
   printf "%s\n" '  guest-agent-msi Build MSI package for the QEMU Guest Agent'
+  printf "%s\n" '  hedgehog        Hedgehog-like embedding backend'
   printf "%s\n" '  hv-balloon      hv-balloon driver (requires Glib 2.68+ GTree API)'
   printf "%s\n" '  hvf             HVF acceleration support'
   printf "%s\n" '  iconv           Font glyph conversion support'
@@ -199,7 +200,6 @@ meson_options_help() {
   printf "%s\n" '  tpm             TPM support'
   printf "%s\n" '  u2f             U2F emulation support'
   printf "%s\n" '  uadk            UADK Library support'
-  printf "%s\n" '  unicorn         Unicorn-like embedding backend'
   printf "%s\n" '  usb-redir       libusbredir support'
   printf "%s\n" '  valgrind        valgrind debug support for coroutine stacks'
   printf "%s\n" '  vde             vde network backend support'
@@ -343,6 +343,8 @@ _meson_option_parse() {
     --disable-guest-agent) printf "%s" -Dguest_agent=disabled ;;
     --enable-guest-agent-msi) printf "%s" -Dguest_agent_msi=enabled ;;
     --disable-guest-agent-msi) printf "%s" -Dguest_agent_msi=disabled ;;
+    --enable-hedgehog) printf "%s" -Dhedgehog=enabled ;;
+    --disable-hedgehog) printf "%s" -Dhedgehog=disabled ;;
     --enable-hexagon-idef-parser) printf "%s" -Dhexagon_idef_parser=true ;;
     --disable-hexagon-idef-parser) printf "%s" -Dhexagon_idef_parser=false ;;
     --enable-hv-balloon) printf "%s" -Dhv_balloon=enabled ;;
@@ -533,8 +535,6 @@ _meson_option_parse() {
     --disable-uadk) printf "%s" -Duadk=disabled ;;
     --enable-ubsan) printf "%s" -Dubsan=true ;;
     --disable-ubsan) printf "%s" -Dubsan=false ;;
-    --enable-unicorn) printf "%s" -Dunicorn=enabled ;;
-    --disable-unicorn) printf "%s" -Dunicorn=disabled ;;
     --enable-usb-redir) printf "%s" -Dusb_redir=enabled ;;
     --disable-usb-redir) printf "%s" -Dusb_redir=disabled ;;
     --enable-valgrind) printf "%s" -Dvalgrind=enabled ;;

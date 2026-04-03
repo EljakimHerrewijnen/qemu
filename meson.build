@@ -927,8 +927,8 @@ if have_tcg
   accelerators += 'CONFIG_TCG'
 endif
 
-if get_option('unicorn').enabled() and not have_tcg
-  error('The unicorn backend requires TCG support')
+if get_option('hedgehog').enabled() and not have_tcg
+  error('The hedgehog backend requires TCG support')
 endif
 
 if 'CONFIG_KVM' not in accelerators and get_option('kvm').enabled()
@@ -3771,6 +3771,7 @@ endif
 
 qom_ss = qom_ss.apply({})
 libqom = static_library('qom', qom_ss.sources() + genh,
+                        pic: true,
                         dependencies: [qom_ss.dependencies()],
                         build_by_default: false)
 qom = declare_dependency(objects: libqom.extract_all_objects(recursive: false),
@@ -3779,6 +3780,7 @@ qom = declare_dependency(objects: libqom.extract_all_objects(recursive: false),
 event_loop_base = files('event-loop-base.c')
 event_loop_base = static_library('event-loop-base',
                                  sources: event_loop_base + genh,
+                                 pic: true,
                                  build_by_default: false)
 event_loop_base = declare_dependency(objects: event_loop_base.extract_all_objects(recursive: false),
                                      dependencies: [qom])
@@ -3789,6 +3791,7 @@ util_ss.add_all(trace_ss)
 util_ss = util_ss.apply({})
 libqemuutil = static_library('qemuutil',
                              build_by_default: false,
+                             pic: true,
                              sources: util_ss.sources() + stub_ss.sources() + genh,
                              dependencies: [util_ss.dependencies(), libm, threads, glib, socket, malloc, rt, pixman, opengl])
 qemuutil = declare_dependency(link_with: libqemuutil,
@@ -3857,6 +3860,7 @@ if get_option('b_lto')
     pagevary_flags += '-fno-sanitize=cfi-icall'
   endif
   pagevary = static_library('page-vary-common', sources: pagevary + genh,
+                            pic: true,
                             c_args: pagevary_flags)
   pagevary = declare_dependency(link_with: pagevary)
 endif
@@ -4032,6 +4036,7 @@ qemu_syms = custom_target('qemu.syms', output: 'qemu.syms',
 
 authz_ss = authz_ss.apply({})
 libauthz = static_library('authz', authz_ss.sources() + genh,
+                          pic: true,
                           dependencies: [authz_ss.dependencies()],
                           build_by_default: false)
 
@@ -4040,6 +4045,7 @@ authz = declare_dependency(objects: libauthz.extract_all_objects(recursive: fals
 
 crypto_ss = crypto_ss.apply({})
 libcrypto = static_library('crypto', crypto_ss.sources() + genh,
+                           pic: true,
                            dependencies: [crypto_ss.dependencies()],
                            build_by_default: false)
 
@@ -4048,6 +4054,7 @@ crypto = declare_dependency(objects: libcrypto.extract_all_objects(recursive: fa
 
 io_ss = io_ss.apply({})
 libio = static_library('io', io_ss.sources() + genh,
+                       pic: true,
                        dependencies: [io_ss.dependencies()],
                        link_with: libqemuutil,
                        build_by_default: false)
@@ -4056,6 +4063,7 @@ io = declare_dependency(objects: libio.extract_all_objects(recursive: false),
                         dependencies: [io_ss.dependencies(), crypto, qom])
 
 libmigration = static_library('migration', sources: migration_files + genh,
+                              pic: true,
                               build_by_default: false)
 migration = declare_dependency(objects: libmigration.extract_all_objects(recursive: false),
                                dependencies: [qom, io])
@@ -4063,6 +4071,7 @@ system_ss.add(migration)
 
 block_ss = block_ss.apply({})
 libblock = static_library('block', block_ss.sources() + genh,
+                          pic: true,
                           dependencies: block_ss.dependencies(),
                           build_by_default: false)
 
@@ -4071,6 +4080,7 @@ block = declare_dependency(objects: libblock.extract_all_objects(recursive: fals
 
 blockdev_ss = blockdev_ss.apply({})
 libblockdev = static_library('blockdev', blockdev_ss.sources() + genh,
+                             pic: true,
                              dependencies: blockdev_ss.dependencies(),
                              build_by_default: false)
 
@@ -4079,6 +4089,7 @@ blockdev = declare_dependency(objects: libblockdev.extract_all_objects(recursive
 
 qmp_ss = qmp_ss.apply({})
 libqmp = static_library('qmp', qmp_ss.sources() + genh,
+                        pic: true,
                         dependencies: qmp_ss.dependencies(),
                         build_by_default: false)
 
@@ -4086,6 +4097,7 @@ qmp = declare_dependency(objects: libqmp.extract_all_objects(recursive: false),
                          dependencies: qmp_ss.dependencies())
 
 libchardev = static_library('chardev', chardev_ss.sources() + genh,
+                            pic: true,
                             dependencies: chardev_ss.dependencies(),
                             build_by_default: false)
 
@@ -4094,12 +4106,14 @@ chardev = declare_dependency(objects: libchardev.extract_all_objects(recursive: 
 
 hwcore_ss = hwcore_ss.apply({})
 libhwcore = static_library('hwcore', sources: hwcore_ss.sources() + genh,
+                           pic: true,
                            build_by_default: false)
 hwcore = declare_dependency(objects: libhwcore.extract_all_objects(recursive: false))
 common_ss.add(hwcore)
 
 audio_ss = audio_ss.apply({})
 libaudio = static_library('qemuaudio', audio_ss.sources() + genh,
+                          pic: true,
                           dependencies: [audio_ss.dependencies()],
                           build_by_default: false)
 
@@ -4118,6 +4132,7 @@ libuser = static_library('user',
                          c_args: ['-DCONFIG_USER_ONLY',
                                   '-DCOMPILING_SYSTEM_VS_USER'],
                          include_directories: common_user_inc,
+                         pic: true,
                          dependencies: user_ss.all_dependencies(),
                          build_by_default: false)
 
@@ -4125,6 +4140,7 @@ libsystem = static_library('system',
                            system_ss.all_sources() + genh,
                            c_args: ['-DCONFIG_SOFTMMU',
                                     '-DCOMPILING_SYSTEM_VS_USER'],
+                           pic: true,
                            dependencies: system_ss.all_dependencies(),
                            build_by_default: false)
 
@@ -4133,6 +4149,7 @@ libsystem = static_library('system',
 # configuration will be in build.ninja, but are never built by default.
 common_all = static_library('common',
                             build_by_default: false,
+                            pic: true,
                             sources: common_ss.all_sources() + genh,
                             implicit_include_directories: false,
                             dependencies: common_ss.all_dependencies())
@@ -4170,6 +4187,7 @@ foreach target_base_arch, config_base_arch : config_base_arch_mak
     lib = static_library(
       'common_' + target_base_arch,
       build_by_default: false,
+      pic: true,
       sources: src.all_sources() + genh,
       include_directories: inc,
       c_args: target_c_args,
@@ -4193,6 +4211,7 @@ foreach target_base_arch, config_base_arch : config_base_arch_mak
     lib = static_library(
       'system_' + target_base_arch,
       build_by_default: false,
+      pic: true,
       sources: src.all_sources() + genh,
       include_directories: inc,
       c_args: target_system_c_args,
@@ -4252,6 +4271,26 @@ endif
 
 traceable = []
 emulators = {}
+hedgehog_backend_target = ''
+hedgehog_backend_aarch64_target = ''
+if get_option('hedgehog').allowed() and have_system
+  if 'x86_64-softmmu' in target_dirs
+    hedgehog_backend_target = 'x86_64-softmmu'
+  else
+    foreach t : target_dirs
+      if t.endswith('-softmmu')
+        hedgehog_backend_target = t
+        break
+      endif
+    endforeach
+  endif
+
+  if 'aarch64-softmmu' in target_dirs
+    if hedgehog_backend_target != 'aarch64-softmmu'
+      hedgehog_backend_aarch64_target = 'aarch64-softmmu'
+    endif
+  endif
+endif
 foreach target : target_dirs
   config_target = config_target_mak[target]
   target_name = config_target['TARGET_NAME']
@@ -4396,7 +4435,30 @@ foreach target : target_dirs
                  objects: objects,
                  include_directories: target_inc,
                  c_args: c_args,
+                 pic: true,
                  build_by_default: false)
+
+  if target == hedgehog_backend_target
+    shared_library('qemu-hedgehog-backend',
+                   sources: files('system/main.c'),
+                   objects: lib.extract_all_objects(recursive: true),
+                   dependencies: arch_deps + [sdl],
+                   include_directories: target_inc,
+                   c_args: c_args,
+                   link_args: emulator_link_args,
+                   install: true)
+  endif
+
+  if target == hedgehog_backend_aarch64_target
+    shared_library('qemu-hedgehog-backend-aarch64',
+                   sources: files('system/main.c'),
+                   objects: lib.extract_all_objects(recursive: true),
+                   dependencies: arch_deps + [sdl],
+                   include_directories: target_inc,
+                   c_args: c_args,
+                   link_args: emulator_link_args,
+                   install: true)
+  endif
 
   if target.endswith('-softmmu')
     execs = [{

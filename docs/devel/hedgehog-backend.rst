@@ -1,10 +1,10 @@
-============================
-Unicorn-like backend proposal
-============================
+==============================
+Hedgehog-like backend proposal
+==============================
 
 .. note::
 
-   This document is a design plan for adding a Unicorn-like backend to
+   This document is a design plan for adding a Hedgehog-like backend to
    QEMU. It intentionally focuses on the smallest viable integration
    points so that the backend can live close to upstream QEMU instead of
    becoming a deep fork of the project.
@@ -13,7 +13,7 @@ Goals
 -----
 
 The backend should make it possible to embed QEMU as a CPU emulator with
-an API that looks closer to Unicorn than to the system emulator command
+an API that looks closer to Hedgehog than to the system emulator command
 line. The initial design should:
 
 * reuse existing ``target/*`` CPU implementations instead of creating a
@@ -31,7 +31,7 @@ Non-goals
 ---------
 
 The first step should not try to expose all of QEMU machine creation,
-device models, migration, block, or monitor features. A Unicorn-like
+device models, migration, block, or monitor features. A Hedgehog-like
 backend is best treated as an embedding API layered on top of existing
 CPU and memory subsystems, not as a new system emulator binary.
 
@@ -42,7 +42,7 @@ The lowest-risk design is to add a small optional backend that builds a
 CPU plus a private address space without introducing a new architecture
 fork.
 
-1. Add a new optional subsystem, for example ``accel/unicorn/``, that
+1. Add a new optional subsystem, for example ``accel/hedgehog/``, that
    owns the embedding API and lifecycle.
 2. Reuse existing target CPUs from ``target/*`` by creating them through
    QOM, exactly like other accelerators and test harnesses do.
@@ -54,7 +54,7 @@ fork.
    * reset/run/stop helpers for the embedding API.
 
 4. Keep all of this behind a dedicated build flag, for example
-   ``CONFIG_UNICORN_BACKEND``.
+   ``CONFIG_HEDGEHOG_BACKEND``.
 
 This keeps target-specific logic where it already lives today, and keeps
 the new code responsible only for embedding, memory mapping, and hook
@@ -66,9 +66,9 @@ Minimal object model
 The backend does not need a full machine model at first. A small QOM
 container is enough:
 
-* ``TYPE_UNICORN_BACKEND``:
+* ``TYPE_HEDGEHOG_BACKEND``:
   owns the API state, guest address space, RAM blocks, and hook lists.
-* ``TYPE_UNICORN_DEVICE``:
+* ``TYPE_HEDGEHOG_DEVICE``:
   a simple ``SysBusDevice`` or ``DeviceState``-derived helper that backs
   callback-driven MMIO ranges.
 
@@ -84,8 +84,8 @@ This backend should be optional and isolated behind build-time guards.
 The smallest upstream-friendly shape is:
 
 * add a meson feature option, disabled by default;
-* translate that option into ``CONFIG_UNICORN_BACKEND``;
-* place the new sources in a dedicated ``accel/unicorn/`` subtree;
+* translate that option into ``CONFIG_HEDGEHOG_BACKEND``;
+* place the new sources in a dedicated ``accel/hedgehog/`` subtree;
 * avoid touching unrelated target or device code unless a hook must run
   on every TCG execution path.
 
@@ -93,27 +93,27 @@ Using ifdefs in only a few files is preferable to carrying large target
 patch stacks. The backend should compile out entirely when the option is
 disabled.
 
-Why reuse QEMU targets instead of adding a Unicorn-only target
---------------------------------------------------------------
+Why reuse QEMU targets instead of adding a Hedgehog-only target
+---------------------------------------------------------------
 
-Creating a separate ``target/unicorn-*`` tree would immediately duplicate
+Creating a separate ``target/hedgehog-*`` tree would immediately duplicate
 instruction decoding, CPU state definitions, helpers, and exception
 handling. That is the same maintenance burden that made the historic
-Unicorn fork diverge heavily.
+Hedgehog fork diverge heavily.
 
 Instead, the backend should instantiate existing CPU types from
 ``target/arm/``, ``target/aarch64/``, ``target/i386/``, and so on. The
 backend API can decide which CPU type to create, but once the CPU exists,
 execution should stay in normal QEMU target code.
 
-This means the "base device" for a Unicorn-like implementation is not a
+This means the "base device" for a Hedgehog-like implementation is not a
 new guest architecture; it is a small host-side container that wraps an
 existing QEMU CPU and address space.
 
 TCG hook placement
 ------------------
 
-The main requirement is to support Unicorn-style hooks without rewriting
+The main requirement is to support Hedgehog-style hooks without rewriting
 all translators. There are three layers of hook support, listed in
 preferred order.
 
@@ -129,7 +129,7 @@ infrastructure already understands:
 * per-instruction execution callbacks;
 * successful memory access callbacks.
 
-For a Unicorn backend, the cleanest first step is to reuse the same style
+For a Hedgehog backend, the cleanest first step is to reuse the same style
 of callback dispatch internally instead of teaching every target
 translator about a second hook ABI.
 
@@ -157,7 +157,7 @@ Use ``accel/tcg/cputlb.c`` only for memory semantics that plugins cannot
 express
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Memory hooks in Unicorn are often expected to observe unmapped or
+Memory hooks in Hedgehog are often expected to observe unmapped or
 protection-fault accesses, not just successful reads and writes. The
 plugin API mostly reports successful accesses, so the backend will
 probably need one additional TCG/MMU integration layer.
@@ -177,7 +177,7 @@ provide:
 Avoid direct translator edits unless a hook needs guest ISA details
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Most Unicorn hooks do not require translator changes. Direct edits under
+Most Hedgehog hooks do not require translator changes. Direct edits under
 ``target/*/translate.c`` should be a last resort for architecture-specific
 features such as precise instruction metadata that cannot be reconstructed
 from the translated block or plugin callbacks.
@@ -216,7 +216,7 @@ Phase 4: invalid memory and exception hooks
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Add a narrow callback path in ``accel/tcg/cputlb.c`` so the backend can
-turn QEMU MMU failures into Unicorn-like status codes and hook callbacks.
+turn QEMU MMU failures into Hedgehog-like status codes and hook callbacks.
 
 Phase 5: architecture polish
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -228,17 +228,17 @@ Phase 6: Python API parity
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 After the C backend is stable, add a Python package that mirrors the
-capabilities of Unicorn's Python API on top of the in-tree backend. That
+capabilities of Hedgehog's Python API on top of the in-tree backend. That
 phase should:
 
-* live under ``python/qemu/unicorn/`` so it can reuse QEMU's existing
+* live under ``python/qemu/hedgehog/`` so it can reuse QEMU's existing
   Python packaging layout;
 * wrap the phase-1 C API first, and only add higher-level Python helpers
   once the low-level surface is stable;
-* expose the same core concepts users expect from Unicorn's Python API:
+* expose the same core concepts users expect from Hedgehog's Python API:
   emulator construction, memory map/read/write, register access, bounded
   execution, and hook registration;
-* provide compatibility shims for Unicorn-style constants and exception
+* provide compatibility shims for Hedgehog-style constants and exception
   types so Python users can port code incrementally rather than
   rewriting everything around QEMU-specific types.
 
@@ -271,5 +271,5 @@ series after this plan should do only the following:
 * expose a tiny C API for create/map/run/stop.
 
 Everything else should remain a follow-up. That keeps the backend close
-to upstream QEMU and avoids the large-scale divergence that made Unicorn
+to upstream QEMU and avoids the large-scale divergence that made Hedgehog
 hard to rebase historically.

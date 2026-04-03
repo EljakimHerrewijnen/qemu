@@ -16,5 +16,5 @@ are only implementing things for HW accelerated hypervisors.
    multi-thread-tcg
    tcg-icount
    tcg-plugins
-   unicorn-backend
+   hedgehog-backend
    replay
