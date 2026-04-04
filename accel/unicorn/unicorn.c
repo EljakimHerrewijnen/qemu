@@ -185,66 +185,73 @@ static bool unicorn_machine_backend_init(const char *machine_type,
                                          CPUState **out_cpu,
                                          Error **errp)
 {
-    Error *local_err = NULL;
     ObjectClass *mc_class;
     MachineClass *mc;
     MachineState *machine;
     g_autofree char *full_type = NULL;
     static gsize initialized;
+    static bool init_ok;
+    bool is_first;
     static const char *const containers[] = {
         "unattached",
         "peripheral",
         "peripheral-anon",
     };
 
-    if (!g_once_init_enter(&initialized)) {
-        error_setg(errp, "machine backend already initialized");
-        return false;
-    }
+    is_first = g_once_init_enter(&initialized);
+    if (is_first) {
+        Error *local_err = NULL;
 
-    module_call_init(MODULE_INIT_QOM);
-    qemu_init_cpu_list();
-    qemu_init_cpu_loop();
-    cpu_exec_init_all();
+        module_call_init(MODULE_INIT_QOM);
+        qemu_init_cpu_list();
+        qemu_init_cpu_loop();
+        cpu_exec_init_all();
 
-    full_type = g_strconcat(machine_type, TYPE_MACHINE_SUFFIX, NULL);
-    mc_class = object_class_by_name(full_type);
-    if (!mc_class) {
-        g_once_init_leave(&initialized, 1);
-        error_setg(errp, "unknown machine type: '%s'", machine_type);
-        return false;
-    }
-    mc = MACHINE_CLASS(mc_class);
+        full_type = g_strconcat(machine_type, TYPE_MACHINE_SUFFIX, NULL);
+        mc_class = object_class_by_name(full_type);
+        if (!mc_class) {
+            error_setg(&local_err, "unknown machine type: '%s'", machine_type);
+            goto done;
+        }
+        mc = MACHINE_CLASS(mc_class);
 
-    machine = MACHINE(object_new_with_class(mc_class));
-    object_property_add_child(object_get_root(), "machine", OBJECT(machine));
+        machine = MACHINE(object_new_with_class(mc_class));
+        object_property_add_child(object_get_root(), "machine",
+                                  OBJECT(machine));
 
-    for (unsigned i = 0; i < ARRAY_SIZE(containers); i++) {
-        object_property_add_new_container(OBJECT(machine), containers[i]);
-    }
-    object_property_add_child(machine_get_container("unattached"),
-                              "sysbus", OBJECT(sysbus_get_default()));
+        for (unsigned i = 0; i < ARRAY_SIZE(containers); i++) {
+            object_property_add_new_container(OBJECT(machine), containers[i]);
+        }
+        object_property_add_child(machine_get_container("unattached"),
+                                  "sysbus", OBJECT(sysbus_get_default()));
 
-    current_machine = machine;
-    machine->ram_size = ram_size > 0 ? (ram_addr_t)ram_size
-                                     : mc->default_ram_size;
-    machine->cpu_type = machine_default_cpu_type(machine);
+        current_machine = machine;
+        machine->ram_size = ram_size > 0 ? (ram_addr_t)ram_size
+                                         : mc->default_ram_size;
+        machine->cpu_type = machine_default_cpu_type(machine);
 
-    tcg_allowed = true;
-    page_init();
-    tb_htable_init();
-    tcg_init(32 * MiB, 0, 1);
-    tcg_prologue_init();
+        tcg_allowed = true;
+        page_init();
+        tb_htable_init();
+        tcg_init(32 * MiB, 0, 1);
+        tcg_prologue_init();
 
-    machine_run_board_init(machine, NULL, &local_err);
-    g_once_init_leave(&initialized, 1);
-    if (local_err) {
+        machine_run_board_init(machine, NULL, &local_err);
+        if (!local_err && !first_cpu) {
+            error_setg(&local_err,
+                       "machine '%s' did not create any CPUs", machine_type);
+        }
+
+done:
+        init_ok = (local_err == NULL);
         error_propagate(errp, local_err);
-        return false;
+        g_once_init_leave(&initialized, 1);
     }
 
-    if (!first_cpu) {
-        error_setg(errp, "machine '%s' did not create any CPUs", machine_type);
+    if (!init_ok) {
+        if (!is_first) {
+            error_setg(errp, "machine backend already initialized");
+        }
         return false;
     }
 
