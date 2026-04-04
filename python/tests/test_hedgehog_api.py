@@ -209,3 +209,29 @@ def test_invalid_mem_hook_can_continue() -> None:
     uc.hook_add(HEDGEHOG_HOOK_MEM_READ_UNMAPPED, invalid_hook)
 
     uc.emu_start(0x4000, 0)
+
+
+def test_machine_type_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: Dict[str, object] = {}
+    backend = FakeBackend()
+
+    def fake_create(
+        cpu_type: str,
+        machine_type: Optional[str] = None,
+        library_path: Optional[str] = None,
+    ) -> FakeBackend:
+        captured['cpu_type'] = cpu_type
+        captured['machine_type'] = machine_type
+        captured['library_path'] = library_path
+        return backend
+
+    monkeypatch.setattr('qemu.hedgehog.api.NativeBackend.create', fake_create)
+
+    uc = Hedgehog(
+        HEDGEHOG_ARCH_X86,
+        HEDGEHOG_MODE_64,
+        machine_type='none',
+    )
+
+    assert captured['machine_type'] == 'none'
+    uc.close()

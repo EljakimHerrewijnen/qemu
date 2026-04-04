@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import glob
 import os
 from typing import Any, Callable, List, Optional, Protocol, Tuple, cast
 from typing import runtime_checkable
@@ -160,6 +161,7 @@ class NativeBackend:
     def create(
         cls,
         cpu_type: str,
+        machine_type: Optional[str] = None,
         library_path: Optional[str] = None,
     ) -> 'NativeBackend':
         """
@@ -177,7 +179,21 @@ class NativeBackend:
                 'failed to initialize qemu hedgehog backend',
             )
 
-        backend = lib.hedgehog_backend_new(cpu_type.encode('ascii'), None)
+        if machine_type and not hasattr(lib, 'hedgehog_backend_new_with_machine'):
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                'loaded backend library does not support machine_type selection',
+            )
+
+        if hasattr(lib, 'hedgehog_backend_new_with_machine'):
+            machine_arg = machine_type.encode('ascii') if machine_type else None
+            backend = lib.hedgehog_backend_new_with_machine(
+                cpu_type.encode('ascii'),
+                machine_arg,
+                None,
+            )
+        else:
+            backend = lib.hedgehog_backend_new(cpu_type.encode('ascii'), None)
         if backend is None or int(backend) == 0:
             raise HedgehogError(
                 HEDGEHOG_ERR_RESOURCE,
@@ -393,7 +409,7 @@ def _maybe_wrap_invalid_hook(
 
 
 def _load_native_library(library_path: Optional[str]) -> ctypes.CDLL:
-    candidates = []
+    candidates: List[str] = []
     if library_path:
         candidates.append(library_path)
 
@@ -401,9 +417,12 @@ def _load_native_library(library_path: Optional[str]) -> ctypes.CDLL:
     if env_path:
         candidates.append(env_path)
 
-    found = ctypes.util.find_library('qemu-hedgehog-backend')
-    if found:
-        candidates.append(found)
+    candidates.extend(_packaged_library_candidates())
+
+    for libname in ('qemu-hedgehog-backend', 'qemu-hedgehog-backend-aarch64'):
+        found = ctypes.util.find_library(libname)
+        if found:
+            candidates.append(found)
 
     for candidate in candidates:
         try:
@@ -418,6 +437,22 @@ def _load_native_library(library_path: Optional[str]) -> ctypes.CDLL:
     )
 
 
+def _packaged_library_candidates() -> List[str]:
+    native_dir = os.path.join(os.path.dirname(__file__), '_native')
+    if not os.path.isdir(native_dir):
+        return []
+
+    matches: List[str] = []
+    patterns = (
+        'libqemu-hedgehog-backend*.so*',
+        'libqemu-hedgehog-backend*.dylib',
+        '*qemu-hedgehog-backend*.dll',
+    )
+    for pattern in patterns:
+        matches.extend(sorted(glob.glob(os.path.join(native_dir, pattern))))
+    return matches
+
+
 def _configure_library_api(lib: ctypes.CDLL) -> None:
     error_ptr_t = ctypes.POINTER(ctypes.c_void_p)
 
@@ -426,6 +461,14 @@ def _configure_library_api(lib: ctypes.CDLL) -> None:
 
     lib.hedgehog_backend_new.argtypes = [ctypes.c_char_p, error_ptr_t]
     lib.hedgehog_backend_new.restype = ctypes.c_void_p
+
+    if hasattr(lib, 'hedgehog_backend_new_with_machine'):
+        lib.hedgehog_backend_new_with_machine.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            error_ptr_t,
+        ]
+        lib.hedgehog_backend_new_with_machine.restype = ctypes.c_void_p
 
     lib.hedgehog_backend_free.argtypes = [ctypes.c_void_p]
     lib.hedgehog_backend_free.restype = None

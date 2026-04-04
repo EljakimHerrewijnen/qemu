@@ -88,6 +88,7 @@ class Hedgehog:
     The constructor mirrors Hedgehog's ``Hedgehog(arch, mode)`` and accepts two
     optional keyword-only extensions:
     - ``cpu_type`` to override QEMU CPU type selection;
+    - ``machine_type`` to choose the QEMU machine type used by the backend;
     - ``backend`` to inject a custom backend implementation.
     """
 
@@ -97,6 +98,7 @@ class Hedgehog:
         mode: int,
         *,
         cpu_type: Optional[str] = None,
+        machine_type: Optional[str] = None,
         backend: Optional[BackendProtocol] = None,
         library_path: Optional[str] = None,
     ):
@@ -112,6 +114,7 @@ class Hedgehog:
                 )
             backend = NativeBackend.create(
                 selected_cpu,
+                machine_type=machine_type,
                 library_path=library_path,
             )
 
