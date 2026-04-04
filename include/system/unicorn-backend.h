@@ -31,6 +31,9 @@ typedef enum UnicornRunResult {
 
 bool unicorn_backend_initialize(Error **errp);
 UnicornBackend *unicorn_backend_new(const char *cpu_type, Error **errp);
+UnicornBackend *unicorn_backend_new_machine(const char *machine_type,
+                                            uint64_t ram_size,
+                                            Error **errp);
 void unicorn_backend_free(UnicornBackend *uc);
 
 bool unicorn_backend_map_ram(UnicornBackend *uc, const char *name,

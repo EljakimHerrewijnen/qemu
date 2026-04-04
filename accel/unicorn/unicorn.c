@@ -11,7 +11,10 @@
 #include "qapi/error.h"
 #include "hw/core/qdev.h"
 #include "hw/core/cpu.h"
+#include "hw/core/boards.h"
+#include "hw/core/sysbus.h"
 #include "exec/cpu-common.h"
+#include "system/address-spaces.h"
 #include "system/cpus.h"
 #include "system/memory.h"
 #include "system/tcg.h"
@@ -34,9 +37,11 @@ struct UnicornBackend {
     CPUState *cpu;
     MemoryRegion root;
     AddressSpace as;
+    AddressSpace *as_ptr;
     GPtrArray *ram_regions;
     GPtrArray *mmio_regions;
     bool stop_requested;
+    bool machine_mode;
 };
 
 static uint64_t unicorn_mmio_read(void *opaque, hwaddr addr, unsigned size)
@@ -106,7 +111,7 @@ bool unicorn_backend_initialize(Error **errp)
 
 UnicornBackend *unicorn_backend_new(const char *cpu_type, Error **errp)
 {
-    g_autoptr(Error) local_err = NULL;
+    Error *local_err = NULL;
     UnicornBackend *uc;
     Object *cpuobj;
 
@@ -116,7 +121,7 @@ UnicornBackend *unicorn_backend_new(const char *cpu_type, Error **errp)
     }
 
     if (!unicorn_backend_initialize(&local_err)) {
-        error_propagate(errp, g_steal_pointer(&local_err));
+        error_propagate(errp, local_err);
         return NULL;
     }
 
@@ -130,20 +135,21 @@ UnicornBackend *unicorn_backend_new(const char *cpu_type, Error **errp)
     cpuobj = object_new(cpu_type);
     object_property_set_link(cpuobj, "memory", OBJECT(&uc->root), &local_err);
     if (local_err) {
-        error_propagate(errp, g_steal_pointer(&local_err));
+        error_propagate(errp, local_err);
         object_unref(cpuobj);
         unicorn_backend_free(uc);
         return NULL;
     }
 
     if (!qdev_realize(DEVICE(cpuobj), NULL, &local_err)) {
-        error_propagate(errp, g_steal_pointer(&local_err));
+        error_propagate(errp, local_err);
         object_unref(cpuobj);
         unicorn_backend_free(uc);
         return NULL;
     }
 
     uc->cpu = CPU(cpuobj);
+    uc->as_ptr = &uc->as;
     unicorn_backend_reset(uc);
     return uc;
 }
@@ -154,21 +160,132 @@ void unicorn_backend_free(UnicornBackend *uc)
         return;
     }
 
-    if (uc->cpu) {
-        object_unparent(OBJECT(uc->cpu));
-        object_unref(OBJECT(uc->cpu));
+    if (!uc->machine_mode) {
+        if (uc->cpu) {
+            object_unparent(OBJECT(uc->cpu));
+            object_unref(OBJECT(uc->cpu));
+        }
+        address_space_destroy(&uc->as);
     }
 
-    address_space_destroy(&uc->as);
     g_ptr_array_free(uc->mmio_regions, true);
     g_ptr_array_free(uc->ram_regions, true);
     g_free(uc);
+}
+
+/*
+ * Machine backend initialization helper.  Called once to set up the TCG
+ * engine in system-emulation mode using a real machine type rather than the
+ * fake machine container used by board mode.  Unlike unicorn_backend_initialize
+ * this path must be taken before any board-mode backend is created because both
+ * paths share global TCG/memory state.
+ */
+static bool unicorn_machine_backend_init(const char *machine_type,
+                                         uint64_t ram_size,
+                                         CPUState **out_cpu,
+                                         Error **errp)
+{
+    Error *local_err = NULL;
+    ObjectClass *mc_class;
+    MachineClass *mc;
+    MachineState *machine;
+    g_autofree char *full_type = NULL;
+    static gsize initialized;
+    static const char *const containers[] = {
+        "unattached",
+        "peripheral",
+        "peripheral-anon",
+    };
+
+    if (!g_once_init_enter(&initialized)) {
+        error_setg(errp, "machine backend already initialized");
+        return false;
+    }
+
+    module_call_init(MODULE_INIT_QOM);
+    qemu_init_cpu_list();
+    qemu_init_cpu_loop();
+    cpu_exec_init_all();
+
+    full_type = g_strconcat(machine_type, TYPE_MACHINE_SUFFIX, NULL);
+    mc_class = object_class_by_name(full_type);
+    if (!mc_class) {
+        g_once_init_leave(&initialized, 1);
+        error_setg(errp, "unknown machine type: '%s'", machine_type);
+        return false;
+    }
+    mc = MACHINE_CLASS(mc_class);
+
+    machine = MACHINE(object_new_with_class(mc_class));
+    object_property_add_child(object_get_root(), "machine", OBJECT(machine));
+
+    for (unsigned i = 0; i < ARRAY_SIZE(containers); i++) {
+        object_property_add_new_container(OBJECT(machine), containers[i]);
+    }
+    object_property_add_child(machine_get_container("unattached"),
+                              "sysbus", OBJECT(sysbus_get_default()));
+
+    current_machine = machine;
+    machine->ram_size = ram_size > 0 ? (ram_addr_t)ram_size
+                                     : mc->default_ram_size;
+    machine->cpu_type = machine_default_cpu_type(machine);
+
+    tcg_allowed = true;
+    page_init();
+    tb_htable_init();
+    tcg_init(32 * MiB, 0, 1);
+    tcg_prologue_init();
+
+    machine_run_board_init(machine, NULL, &local_err);
+    g_once_init_leave(&initialized, 1);
+    if (local_err) {
+        error_propagate(errp, local_err);
+        return false;
+    }
+
+    if (!first_cpu) {
+        error_setg(errp, "machine '%s' did not create any CPUs", machine_type);
+        return false;
+    }
+
+    *out_cpu = first_cpu;
+    return true;
+}
+
+UnicornBackend *unicorn_backend_new_machine(const char *machine_type,
+                                            uint64_t ram_size,
+                                            Error **errp)
+{
+    Error *local_err = NULL;
+    CPUState *cpu = NULL;
+    UnicornBackend *uc;
+
+    if (!machine_type) {
+        error_setg(errp, "a machine type is required");
+        return NULL;
+    }
+
+    if (!unicorn_machine_backend_init(machine_type, ram_size, &cpu,
+                                      &local_err)) {
+        error_propagate(errp, local_err);
+        return NULL;
+    }
+
+    uc = g_new0(UnicornBackend, 1);
+    uc->cpu = cpu;
+    uc->as_ptr = &address_space_memory;
+    uc->machine_mode = true;
+    uc->ram_regions = g_ptr_array_new_with_free_func(g_free);
+    uc->mmio_regions = g_ptr_array_new_with_free_func(g_free);
+    uc->stop_requested = false;
+    return uc;
 }
 
 bool unicorn_backend_map_ram(UnicornBackend *uc, const char *name,
                              hwaddr addr, uint64_t size, Error **errp)
 {
     UnicornRAMRegion *region;
+    MemoryRegion *parent;
 
     if (!uc || !size) {
         error_setg(errp, "RAM mapping requires a backend and non-zero size");
@@ -183,7 +300,8 @@ bool unicorn_backend_map_ram(UnicornBackend *uc, const char *name,
         return false;
     }
 
-    memory_region_add_subregion(&uc->root, addr, &region->mr);
+    parent = uc->machine_mode ? get_system_memory() : &uc->root;
+    memory_region_add_subregion(parent, addr, &region->mr);
     g_ptr_array_add(uc->ram_regions, region);
     return true;
 }
@@ -195,6 +313,7 @@ bool unicorn_backend_map_mmio(UnicornBackend *uc, const char *name,
                               void *opaque, Error **errp)
 {
     UnicornMMIORegion *region;
+    MemoryRegion *parent;
 
     if (!uc || !size) {
         error_setg(errp, "MMIO mapping requires a backend and non-zero size");
@@ -208,7 +327,8 @@ bool unicorn_backend_map_mmio(UnicornBackend *uc, const char *name,
 
     memory_region_init_io(&region->mr, NULL, &unicorn_mmio_ops, region,
                           name ?: "unicorn-mmio", size);
-    memory_region_add_subregion(&uc->root, addr, &region->mr);
+    parent = uc->machine_mode ? get_system_memory() : &uc->root;
+    memory_region_add_subregion(parent, addr, &region->mr);
     g_ptr_array_add(uc->mmio_regions, region);
     return true;
 }
@@ -217,14 +337,16 @@ MemTxResult unicorn_backend_mem_read(UnicornBackend *uc, hwaddr addr,
                                      void *buf, hwaddr len)
 {
     g_assert(uc);
-    return address_space_read(&uc->as, addr, MEMTXATTRS_UNSPECIFIED, buf, len);
+    return address_space_read(uc->as_ptr, addr, MEMTXATTRS_UNSPECIFIED,
+                              buf, len);
 }
 
 MemTxResult unicorn_backend_mem_write(UnicornBackend *uc, hwaddr addr,
                                       const void *buf, hwaddr len)
 {
     g_assert(uc);
-    return address_space_write(&uc->as, addr, MEMTXATTRS_UNSPECIFIED, buf, len);
+    return address_space_write(uc->as_ptr, addr, MEMTXATTRS_UNSPECIFIED,
+                               buf, len);
 }
 
 void unicorn_backend_reset(UnicornBackend *uc)
@@ -243,7 +365,10 @@ void unicorn_backend_set_pc(UnicornBackend *uc, vaddr addr)
 vaddr unicorn_backend_get_pc(UnicornBackend *uc)
 {
     g_assert(uc);
-    return cpu_get_pc(uc->cpu);
+    if (!uc->cpu->cc->get_pc) {
+        return 0;
+    }
+    return uc->cpu->cc->get_pc(uc->cpu);
 }
 
 static UnicornRunResult unicorn_backend_translate_run_result(int cpu_exit)
@@ -318,5 +443,5 @@ CPUState *unicorn_backend_cpu(UnicornBackend *uc)
 
 AddressSpace *unicorn_backend_address_space(UnicornBackend *uc)
 {
-    return uc ? &uc->as : NULL;
+    return uc ? uc->as_ptr : NULL;
 }
