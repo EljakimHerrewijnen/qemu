@@ -47,7 +47,12 @@ typedef enum HedgehogRunResult {
 } HedgehogRunResult;
 
 bool hedgehog_backend_initialize(Error **errp);
+bool hedgehog_backend_initialize_for_machine(const char *machine_type,
+                                             Error **errp);
 HedgehogBackend *hedgehog_backend_new(const char *cpu_type, Error **errp);
+HedgehogBackend *hedgehog_backend_new_with_machine(const char *cpu_type,
+                                                   const char *machine_type,
+                                                   Error **errp);
 void hedgehog_backend_free(HedgehogBackend *uc);
 
 bool hedgehog_backend_map_ram(HedgehogBackend *uc, const char *name,

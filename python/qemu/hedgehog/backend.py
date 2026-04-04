@@ -173,7 +173,15 @@ class NativeBackend:
         lib = _load_native_library(library_path)
         _configure_library_api(lib)
 
-        if not bool(lib.hedgehog_backend_initialize(None)):
+        if machine_type and hasattr(lib, 'hedgehog_backend_initialize_for_machine'):
+            machine_arg = machine_type.encode('ascii')
+            initialized = bool(
+                lib.hedgehog_backend_initialize_for_machine(machine_arg, None)
+            )
+        else:
+            initialized = bool(lib.hedgehog_backend_initialize(None))
+
+        if not initialized:
             raise HedgehogError(
                 HEDGEHOG_ERR_RESOURCE,
                 'failed to initialize qemu hedgehog backend',
@@ -458,6 +466,13 @@ def _configure_library_api(lib: ctypes.CDLL) -> None:
 
     lib.hedgehog_backend_initialize.argtypes = [error_ptr_t]
     lib.hedgehog_backend_initialize.restype = ctypes.c_bool
+
+    if hasattr(lib, 'hedgehog_backend_initialize_for_machine'):
+        lib.hedgehog_backend_initialize_for_machine.argtypes = [
+            ctypes.c_char_p,
+            error_ptr_t,
+        ]
+        lib.hedgehog_backend_initialize_for_machine.restype = ctypes.c_bool
 
     lib.hedgehog_backend_new.argtypes = [ctypes.c_char_p, error_ptr_t]
     lib.hedgehog_backend_new.restype = ctypes.c_void_p

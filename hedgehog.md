@@ -171,6 +171,11 @@ Notes:
 - The package name is `qemu`, with the Hedgehog wrapper under `qemu.hedgehog`.
 - The native wrapper expects a shared library path in
     `QEMU_HEDGEHOG_BACKEND_LIBRARY`.
+- Wheel builds can bundle the backend library automatically by setting
+    `QEMU_HEDGEHOG_BACKEND_BUILD_DIR` to a build directory containing
+    `libqemu-hedgehog-backend*.so`.
+- Bundled libraries are loaded automatically from `qemu/hedgehog/_native`
+    before falling back to system linker lookup.
 - If you are running from the source tree, use
     `QEMU_HEDGEHOG_BACKEND_LIBRARY=$PWD/build/libqemu-hedgehog-backend.so`.
 
@@ -223,6 +228,78 @@ try:
 except HedgehogError as err:
     print(f"Hedgehog failed: {err}")
 ```
+
+## Python Machine Type Example
+
+The Python API now accepts `machine_type` and forwards it to the native
+backend creation path:
+
+```python
+import os
+
+from qemu.hedgehog import (
+    Hedgehog,
+    HedgehogError,
+    HEDGEHOG_ARCH_X86,
+    HEDGEHOG_MODE_64,
+)
+
+os.environ["QEMU_HEDGEHOG_BACKEND_LIBRARY"] = "/home/me/qemu/build/libqemu-hedgehog-backend.so"
+
+try:
+    emu = Hedgehog(
+        HEDGEHOG_ARCH_X86,
+        HEDGEHOG_MODE_64,
+        cpu_type="qemu64-x86_64-cpu",
+        machine_type="none",  # explicit machine selection
+    )
+
+    emu.mem_map(0x1000, 0x1000)
+    emu.close()
+
+except HedgehogError as err:
+    print(f"Hedgehog machine-type setup failed: {err}")
+```
+
+Raspberry Pi 3B machine type example:
+
+```python
+import os
+
+from qemu.hedgehog import (
+    Hedgehog,
+    HedgehogError,
+    HEDGEHOG_ARCH_ARM64,
+    HEDGEHOG_MODE_ARM,
+)
+
+os.environ["QEMU_HEDGEHOG_BACKEND_LIBRARY"] = "/home/me/qemu/build/libqemu-hedgehog-backend-aarch64.so"
+
+try:
+    emu = Hedgehog(
+        HEDGEHOG_ARCH_ARM64,
+        HEDGEHOG_MODE_ARM,
+        cpu_type="cortex-a53",
+        machine_type="raspi3b",
+    )
+
+    # Run a short bounded execution window, then close.
+    emu.emu_start(begin=0, until=0, count=16)
+    emu.close()
+
+except HedgehogError as err:
+    print(f"Hedgehog raspi3b setup failed: {err}")
+```
+
+Current behavior:
+
+- If `machine_type` is omitted, Hedgehog defaults to `none`.
+- A process is locked to a single machine type after first Hedgehog
+    initialization; attempting to switch machine type later in the same process
+    returns an error.
+- Board-backed machine types (for example `raspi3b`) run through machine
+    realization and use the board-created CPU/memory model.
+- In board-backed mode, `mem_map` and `mem_map_mmio` are not supported.
 
 ## AArch64 Python Usage Example
 

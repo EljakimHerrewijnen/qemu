@@ -8,6 +8,9 @@ typedef int hedgehog_reg_read_sig(HedgehogBackend *uc, int regno,
 typedef int hedgehog_reg_write_sig(HedgehogBackend *uc, int regno,
                                   const uint8_t *buf, size_t buf_size,
                                   Error **errp);
+typedef HedgehogBackend *hedgehog_new_with_machine_sig(const char *cpu_type,
+                                                      const char *machine_type,
+                                                      Error **errp);
 
 _Static_assert(__builtin_types_compatible_p(__typeof__(hedgehog_backend_reg_read),
                                             hedgehog_reg_read_sig),
@@ -15,6 +18,10 @@ _Static_assert(__builtin_types_compatible_p(__typeof__(hedgehog_backend_reg_read
 _Static_assert(__builtin_types_compatible_p(__typeof__(hedgehog_backend_reg_write),
                                             hedgehog_reg_write_sig),
                "hedgehog_backend_reg_write signature mismatch");
+_Static_assert(__builtin_types_compatible_p(
+                   __typeof__(hedgehog_backend_new_with_machine),
+                   hedgehog_new_with_machine_sig),
+               "hedgehog_backend_new_with_machine signature mismatch");
 
 static bool noop_exec_hook(HedgehogBackend *uc, vaddr pc, void *opaque)
 {
