@@ -273,3 +273,62 @@ series after this plan should do only the following:
 Everything else should remain a follow-up. That keeps the backend close
 to upstream QEMU and avoids the large-scale divergence that made Hedgehog
 hard to rebase historically.
+
+Machine backend mode
+--------------------
+
+The board mode (``unicorn_backend_new``) creates a minimal CPU container
+with a private address space and lets the caller map RAM and MMIO regions
+manually.  The machine backend mode (``unicorn_backend_new_machine``)
+takes a different approach: it instantiates a full QEMU machine type and
+uses the machine's pre-configured address space for all memory operations.
+
+The two modes are mutually exclusive within a single process because they
+share global TCG and memory state.
+
+How it works
+~~~~~~~~~~~~
+
+``unicorn_backend_new_machine(machine_type, ram_size, errp)`` does the
+following:
+
+1. Initialises the QOM type system, CPU list, and memory subsystem exactly
+   once (using a ``g_once``-style guard).
+2. Resolves the machine class via ``object_class_by_name`` using the
+   ``MACHINE_TYPE_NAME`` suffix convention (e.g. ``"microbit"`` becomes
+   the QOM type name ``"microbit-machine"``).
+3. Creates the machine object and registers it as the child ``"machine"``
+   of the QEMU object root so that ``machine_get_container()`` and the
+   rest of the device model work normally.
+4. Creates the standard machine sub-containers (``"unattached"``,
+   ``"peripheral"``, ``"peripheral-anon"``) and registers the default
+   system bus under ``"unattached/sysbus"``.
+5. Sets ``current_machine``, the RAM size, and the default CPU type
+   provided by the machine class.
+6. Initialises TCG.
+7. Calls ``machine_run_board_init()`` to invoke the machine's ``init``
+   callback, which creates all of the machine's devices and memory
+   regions exactly as in a normal system emulation run.
+8. Returns a ``UnicornBackend`` that refers to ``first_cpu`` and to the
+   global ``address_space_memory`` established by the machine.
+
+After the backend is created, the standard API (``unicorn_backend_run``,
+``unicorn_backend_set_pc``, ``unicorn_backend_mem_read``, etc.) works
+identically to board mode.  ``unicorn_backend_map_ram`` and
+``unicorn_backend_map_mmio`` add regions to the machine's
+``get_system_memory()`` tree in this mode.
+
+Choosing between board mode and machine mode
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use **board mode** when you want full control over the memory map and do
+not need any of the peripheral models that a machine provides (interrupt
+controllers, timers, serial ports, etc.).  Board mode is cheaper to
+initialise and imposes no target-specific constraints.
+
+Use **machine mode** when you need the firmware or code under analysis to
+see a realistic hardware environment.  The machine's devices are
+initialised in exactly the same way as in a normal ``qemu-system-*``
+invocation, so the guest can interact with existing device models
+without modification.
+

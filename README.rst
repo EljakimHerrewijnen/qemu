@@ -64,6 +64,163 @@ Additional information can also be found online via the QEMU website:
 * `<https://wiki.qemu.org/Hosts/W32>`_
 
 
+Embedding API (Unicorn backend)
+===============================
+
+QEMU ships an optional Unicorn-like embedding API that lets you use the
+TCG CPU emulator as a library rather than a standalone process.  It is
+designed for fuzzing, binary analysis, and unit testing of firmware.
+
+Building with the embedding API enabled
+----------------------------------------
+
+Pass ``--enable-unicorn`` to ``configure`` together with the target
+architecture you want to embed.  Everything else compiles out when the
+option is absent.
+
+.. code-block:: shell
+
+  mkdir build
+  cd build
+  ../configure --enable-unicorn --target-list=arm-softmmu
+  make
+
+The public header is ``include/system/unicorn-backend.h``.  Link your
+host program against the QEMU system library for the chosen target.
+
+Board mode — bare CPU with a custom memory map
+-----------------------------------------------
+
+Board mode gives you a single CPU and a flat address space that you
+populate yourself with RAM and MMIO regions.  It is the lightest option
+and requires no target-specific machine knowledge.
+
+.. code-block:: c
+
+  #include "system/unicorn-backend.h"
+
+  /* Thumb-2 code: mov r0, #1; mov r1, #2; add r2, r0, r1; bkpt #0 */
+  static const uint8_t code[] = {
+      0x01, 0x20,             /* movs r0, #1  */
+      0x02, 0x21,             /* movs r1, #2  */
+      0x08, 0xeb, 0x01, 0x02, /* add.w r2, r0, r1 */
+      0x00, 0xbe,             /* bkpt #0      */
+  };
+
+  int main(void)
+  {
+      Error *err = NULL;
+      UnicornBackend *uc;
+      UnicornRunResult res;
+
+      /* Create a Cortex-M3 CPU with a private address space. */
+      uc = unicorn_backend_new("cortex-m3-arm-cpu", &err);
+      if (!uc) {
+          fprintf(stderr, "create failed: %s\n", error_get_pretty(err));
+          return 1;
+      }
+
+      /* Map 1 MiB of RAM at address 0x00000000. */
+      if (!unicorn_backend_map_ram(uc, "rom", 0x00000000, 1 * 1024 * 1024, &err)) {
+          fprintf(stderr, "map_ram failed: %s\n", error_get_pretty(err));
+          return 1;
+      }
+
+      /* Write the machine code into guest memory. */
+      unicorn_backend_mem_write(uc, 0x00000000, code, sizeof(code));
+
+      /* Thumb code: set the LSB of the PC to select Thumb mode. */
+      unicorn_backend_set_pc(uc, 0x00000001);
+
+      /* Run for up to 4 instructions. */
+      res = unicorn_backend_run(uc, 4, NULL);
+      printf("run result: %d, pc=0x%lx\n", res,
+             (unsigned long)unicorn_backend_get_pc(uc));
+
+      unicorn_backend_free(uc);
+      return 0;
+  }
+
+Machine mode — full QEMU machine with pre-configured devices
+-------------------------------------------------------------
+
+Machine mode instantiates a real QEMU machine type (interrupt
+controllers, timers, serial ports and all) before handing control to
+you.  Use it when the firmware you are testing expects a specific board
+layout.
+
+.. code-block:: c
+
+  #include "system/unicorn-backend.h"
+
+  int main(void)
+  {
+      Error *err = NULL;
+      UnicornBackend *uc;
+      UnicornRunResult res;
+
+      /*
+       * Boot a BBC micro:bit machine.  Pass 0 for ram_size to use the
+       * machine's default RAM configuration.
+       */
+      uc = unicorn_backend_new_machine("microbit", 0, &err);
+      if (!uc) {
+          fprintf(stderr, "create failed: %s\n", error_get_pretty(err));
+          return 1;
+      }
+
+      /*
+       * Load firmware into flash.  On the micro:bit the flash starts at
+       * 0x00000000.  unicorn_backend_mem_write() reaches the machine's
+       * global address_space_memory, so all mapped regions are visible.
+       */
+      /* unicorn_backend_mem_write(uc, 0x00000000, firmware, firmware_len); */
+
+      /* Reset the CPU and set the entry point. */
+      unicorn_backend_reset(uc);
+      unicorn_backend_set_pc(uc, 0x00000001); /* Thumb entry */
+
+      /* Run until the CPU halts, an exception fires, or the budget runs out. */
+      res = unicorn_backend_run(uc, 1000, NULL);
+      printf("run result: %d, pc=0x%lx\n", res,
+             (unsigned long)unicorn_backend_get_pc(uc));
+
+      unicorn_backend_free(uc);
+      return 0;
+  }
+
+MMIO callbacks
+--------------
+
+Both modes support registering C callbacks for memory-mapped I/O ranges:
+
+.. code-block:: c
+
+  static uint64_t uart_read(void *opaque, hwaddr offset, unsigned size)
+  {
+      printf("[uart] read  offset=0x%lx size=%u\n", (unsigned long)offset, size);
+      return 0;
+  }
+
+  static void uart_write(void *opaque, hwaddr offset,
+                         uint64_t value, unsigned size)
+  {
+      printf("[uart] write offset=0x%lx val=0x%lx size=%u\n",
+             (unsigned long)offset, (unsigned long)value, size);
+  }
+
+  /* Register a 4 KiB MMIO window at 0x40000000. */
+  unicorn_backend_map_mmio(uc, "uart", 0x40000000, 0x1000,
+                           uart_read, uart_write, NULL, &err);
+
+Further reading
+---------------
+
+Full design documentation including the phased implementation plan, TCG
+hook placement strategy, and an explanation of the board vs. machine mode
+trade-offs can be found in ``docs/devel/unicorn-backend.rst``.
+
+
 Submitting patches
 ==================
 
