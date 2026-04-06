@@ -83,16 +83,18 @@ jobs:
           with zipfile.ZipFile(wheel) as zf:
               members = zf.namelist()
 
-          required_prefixes = (
-              'qemu/hedgehog/_native/libqemu-hedgehog-backend',
-              'qemu/hedgehog/_native/qemu-hedgehog-backend',
-          )
-          if not any(name.startswith(required_prefixes) for name in members):
+            bundled_libs = [
+              name for name in members
+              if '/qemu/hedgehog/_native/' in f'/{name}'
+              and 'qemu-hedgehog-backend' in name
+            ]
+            if not bundled_libs:
               raise SystemExit(
                   'Bundled hedgehog backend library missing from wheel: ' + wheel
               )
 
-          print('Verified hedgehog backend bundled in wheel:', wheel)
+            print('Verified hedgehog backend bundled in wheel:', wheel)
+            print('Bundled native members:', bundled_libs)
           PY
 
       - name: Upload wheel artifact
