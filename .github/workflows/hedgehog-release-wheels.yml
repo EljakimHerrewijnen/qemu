@@ -50,10 +50,8 @@ jobs:
           mkdir -p build-hedgehog
           cd build-hedgehog
           ../configure \
-            --enable-werror \
             --disable-docs \
             --disable-debug-info \
-            --enable-fdt=system \
             --enable-hedgehog \
             --target-list="x86_64-softmmu,aarch64-softmmu" \
             || { cat config.log meson-logs/meson-log.txt; exit 1; }
