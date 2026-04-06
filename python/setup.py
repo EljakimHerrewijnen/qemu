@@ -13,6 +13,11 @@ from pathlib import Path
 import shutil
 import sys
 
+try:
+    from wheel.bdist_wheel import bdist_wheel
+except ImportError:  # pragma: no cover - wheel is present during wheel builds
+    bdist_wheel = None
+
 
 class bdist_egg_guard(bdist_egg.bdist_egg):
     """
@@ -29,6 +34,16 @@ class bdist_egg_guard(bdist_egg.bdist_egg):
         )
 
 
+if bdist_wheel:
+    class bdist_wheel_with_hedgehog_backend(bdist_wheel):
+        """
+        Mark wheels as platform-specific when bundling native Hedgehog libs.
+        """
+        def finalize_options(self):
+            super().finalize_options()
+            self.root_is_pure = False
+
+
 class build_py_with_hedgehog_backend(build_py.build_py):
     """
     Optionally bundle prebuilt Hedgehog backend shared libraries into wheels.
@@ -38,6 +53,9 @@ class build_py_with_hedgehog_backend(build_py.build_py):
     - QEMU_HEDGEHOG_BACKEND_BUILD_DIR (directory)
     - ../build-hedgehog
     - ../build
+
+    Set QEMU_HEDGEHOG_REQUIRE_NATIVE=1 to fail packaging if no backend
+    library can be found and bundled.
     """
 
     _native_globs = (
@@ -94,17 +112,23 @@ class build_py_with_hedgehog_backend(build_py.build_py):
             shutil.copy2(source, destination)
             copied.append(str(destination))
 
+        require_native = os.getenv('QEMU_HEDGEHOG_REQUIRE_NATIVE', '').lower()
+        require_native = require_native in ('1', 'true', 'yes', 'on')
+
         if copied:
             print(
                 'Bundled Hedgehog backend libraries: ' +
                 ', '.join(Path(path).name for path in copied)
             )
         else:
-            print(
+            message = (
                 'No Hedgehog backend library bundled; '
                 'set QEMU_HEDGEHOG_BACKEND_LIBRARY or '
                 'QEMU_HEDGEHOG_BACKEND_BUILD_DIR to include one.'
             )
+            if require_native:
+                raise RuntimeError(message)
+            print(message)
 
         return copied
 
@@ -114,12 +138,14 @@ def main():
     QEMU tooling installer
     """
 
-    setuptools.setup(
-        cmdclass={
-            'bdist_egg': bdist_egg_guard,
-            'build_py': build_py_with_hedgehog_backend,
-        }
-    )
+    cmdclass = {
+        'bdist_egg': bdist_egg_guard,
+        'build_py': build_py_with_hedgehog_backend,
+    }
+    if bdist_wheel:
+        cmdclass['bdist_wheel'] = bdist_wheel_with_hedgehog_backend
+
+    setuptools.setup(cmdclass=cmdclass)
 
 
 if __name__ == '__main__':

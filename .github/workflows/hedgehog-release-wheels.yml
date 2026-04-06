@@ -1,0 +1,216 @@
+name: Hedgehog Release Wheels
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-wheel:
+    name: Build wheel (${{ matrix.host_arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host_arch: x86_64
+            runner: ubuntu-24.04
+          - host_arch: aarch64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc \
+            g++ \
+            make \
+            meson \
+            ninja-build \
+            pkg-config \
+            libglib2.0-dev \
+            libpixman-1-dev \
+            python3-venv
+
+      - name: Configure QEMU with Hedgehog
+        run: |
+          mkdir -p build-hedgehog
+          cd build-hedgehog
+          ../configure \
+            --enable-werror \
+            --disable-docs \
+            --disable-debug-info \
+            --enable-fdt=system \
+            --enable-hedgehog \
+            --target-list="x86_64-softmmu,aarch64-softmmu" \
+            || { cat config.log meson-logs/meson-log.txt; exit 1; }
+
+      - name: Build Hedgehog backend libraries
+        run: |
+          ninja -C build-hedgehog \
+            libqemu-hedgehog-backend.so \
+            libqemu-hedgehog-backend-aarch64.so
+
+      - name: Build Python wheel with bundled libraries
+        run: |
+          mkdir -p dist
+          QEMU_HEDGEHOG_BACKEND_BUILD_DIR="$PWD/build-hedgehog" \
+          QEMU_HEDGEHOG_REQUIRE_NATIVE=1 \
+          python -m pip wheel --no-deps ./python -w dist
+
+      - name: Verify wheel contains bundled libraries
+        run: |
+          python - <<'PY'
+          import glob
+          import zipfile
+
+          wheels = glob.glob('dist/*.whl')
+          if len(wheels) != 1:
+              raise SystemExit(f'Expected exactly one wheel, got: {wheels}')
+
+          wheel = wheels[0]
+          with zipfile.ZipFile(wheel) as zf:
+              members = zf.namelist()
+
+          required_prefixes = (
+              'qemu/hedgehog/_native/libqemu-hedgehog-backend',
+              'qemu/hedgehog/_native/qemu-hedgehog-backend',
+          )
+          if not any(name.startswith(required_prefixes) for name in members):
+              raise SystemExit(
+                  'Bundled hedgehog backend library missing from wheel: ' + wheel
+              )
+
+          print('Verified hedgehog backend bundled in wheel:', wheel)
+          PY
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hedgehog-wheel-${{ matrix.host_arch }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  verify-install:
+    name: Verify install (${{ matrix.host_arch }})
+    runs-on: ${{ matrix.runner }}
+    needs: build-wheel
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - host_arch: x86_64
+            runner: ubuntu-24.04
+          - host_arch: aarch64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: hedgehog-wheel-${{ matrix.host_arch }}
+          path: dist
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install wheel in fresh venv
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install --upgrade pip
+          pip install dist/*.whl
+
+      - name: Verify import, bundled libs, and runtime smoke
+        run: |
+          . .venv/bin/activate
+          python - <<'PY'
+          import os
+          import pathlib
+          import qemu.hedgehog as hh
+
+          native_dir = pathlib.Path(hh.__file__).resolve().parent / '_native'
+          libs = sorted(native_dir.glob('*qemu-hedgehog-backend*'))
+          if not libs:
+              raise SystemExit('No bundled hedgehog native libraries found')
+
+          x86_lib = native_dir / 'libqemu-hedgehog-backend.so'
+          if not x86_lib.exists():
+              raise SystemExit(f'Missing expected x86 backend library: {x86_lib}')
+          os.environ['QEMU_HEDGEHOG_BACKEND_LIBRARY'] = str(x86_lib)
+
+          CODE = bytes([
+              0x90,
+              0x90,
+              0xF4,
+          ])
+
+          with hh.Hedgehog(
+              hh.HEDGEHOG_ARCH_X86,
+              hh.HEDGEHOG_MODE_64,
+              cpu_type='qemu64-x86_64-cpu',
+          ) as emu:
+              base = 0x1000
+              emu.mem_map(base, 0x1000)
+              emu.mem_write(base, CODE)
+              emu.emu_start(begin=base, until=0, count=16)
+
+          print('Runtime smoke passed with bundled libraries:', [p.name for p in libs])
+          PY
+
+  publish-release:
+    name: Publish GitHub release assets
+    runs-on: ubuntu-24.04
+    needs:
+      - build-wheel
+      - verify-install
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: hedgehog-wheel-*
+          merge-multiple: true
+          path: dist
+
+      - name: Validate required wheel coverage
+        run: |
+          python - <<'PY'
+          import glob
+
+          wheels = sorted(glob.glob('dist/*.whl'))
+          if len(wheels) < 2:
+              raise SystemExit(f'Expected at least 2 wheels, got: {wheels}')
+
+          required = ('x86_64', 'aarch64')
+          missing = [arch for arch in required if not any(arch in wheel for wheel in wheels)]
+          if missing:
+              raise SystemExit(
+                  f'Missing required architecture wheel(s): {missing}. Wheels: {wheels}'
+              )
+
+          print('Release wheel coverage check passed:', wheels)
+          PY
+
+      - name: Upload assets to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.whl
+          generate_release_notes: true
+          fail_on_unmatched_files: true

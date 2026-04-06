@@ -74,6 +74,69 @@ build-system-debian:
       sparc-softmmu xtensa-softmmu
     MAKE_CHECK_ARGS: check-build
 
+build-hedgehog-python-package-debian:
+  extends: .native_build_job_template
+  needs:
+    - job: amd64-debian-container
+  artifacts:
+    when: on_success
+    expire_in: 7 days
+    paths:
+      - build/wheelhouse/*.whl
+  variables:
+    IMAGE: debian
+    TARGETS: x86_64-softmmu
+    CONFIGURE_ARGS: --enable-hedgehog
+  script:
+    - export CCACHE_BASEDIR="$(pwd)"
+    - export CCACHE_DIR="$CCACHE_BASEDIR/ccache"
+    - export CCACHE_MAXSIZE="500M"
+    - export PATH="$CCACHE_WRAPPERSDIR:$PATH"
+    - mkdir build
+    - cd build
+    - ccache --zero-stats
+    - section_start configure "Running configure"
+    - ../configure --enable-werror --disable-docs --enable-fdt=system
+          --disable-debug-info
+          ${TARGETS:+--target-list="$TARGETS"}
+          $CONFIGURE_ARGS ||
+      { cat config.log meson-logs/meson-log.txt && exit 1; }
+    - section_end configure
+    - section_start build "Building QEMU"
+    - $MAKE -j"$JOBS"
+    - section_end build
+    - section_start package "Building Python wheel with bundled hedgehog backend"
+    - mkdir -p wheelhouse
+    - QEMU_HEDGEHOG_BACKEND_BUILD_DIR="$PWD" pyvenv/bin/python -m pip wheel --no-deps ../python -w wheelhouse
+    - section_end package
+    - section_start verify "Verifying bundled backend is inside wheel"
+    - |
+      pyvenv/bin/python - <<'PY'
+      import glob
+      import zipfile
+
+      wheels = glob.glob('wheelhouse/*.whl')
+      if not wheels:
+          raise SystemExit('No wheel produced in build/wheelhouse')
+
+      wheel = wheels[0]
+      with zipfile.ZipFile(wheel) as zf:
+          members = zf.namelist()
+
+      required_prefixes = (
+          'qemu/hedgehog/_native/libqemu-hedgehog-backend',
+          'qemu/hedgehog/_native/qemu-hedgehog-backend',
+      )
+      if not any(name.startswith(required_prefixes) for name in members):
+          raise SystemExit(
+              'Bundled hedgehog backend library missing from wheel: ' + wheel
+          )
+
+      print('Verified hedgehog backend bundled in wheel:', wheel)
+      PY
+    - section_end verify
+    - ccache --show-stats
+
 check-system-debian:
   extends: .native_test_job_template
   needs:
