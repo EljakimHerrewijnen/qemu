@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-wheel:
-    name: Build wheel (${{ matrix.host_arch }})
+    name: Build wheel (${{ matrix.host_arch }}, py${{ matrix.python_version }})
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -19,8 +19,16 @@ jobs:
         include:
           - host_arch: x86_64
             runner: ubuntu-24.04
+            python_version: '3.11'
+          - host_arch: x86_64
+            runner: ubuntu-24.04
+            python_version: '3.12'
           - host_arch: aarch64
             runner: ubuntu-24.04-arm
+            python_version: '3.11'
+          - host_arch: aarch64
+            runner: ubuntu-24.04-arm
+            python_version: '3.12'
 
     steps:
       - name: Checkout source
@@ -29,7 +37,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python_version }}
 
       - name: Install host build dependencies
         run: |
@@ -100,12 +108,12 @@ jobs:
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: hedgehog-wheel-${{ matrix.host_arch }}
+          name: hedgehog-wheel-${{ matrix.host_arch }}-py${{ matrix.python_version }}
           path: dist/*.whl
           if-no-files-found: error
 
   verify-install:
-    name: Verify install (${{ matrix.host_arch }})
+    name: Verify install (${{ matrix.host_arch }}, py${{ matrix.python_version }})
     runs-on: ${{ matrix.runner }}
     needs: build-wheel
     strategy:
@@ -114,20 +122,28 @@ jobs:
         include:
           - host_arch: x86_64
             runner: ubuntu-24.04
+            python_version: '3.11'
+          - host_arch: x86_64
+            runner: ubuntu-24.04
+            python_version: '3.12'
           - host_arch: aarch64
             runner: ubuntu-24.04-arm
+            python_version: '3.11'
+          - host_arch: aarch64
+            runner: ubuntu-24.04-arm
+            python_version: '3.12'
 
     steps:
       - name: Download wheel artifact
         uses: actions/download-artifact@v4
         with:
-          name: hedgehog-wheel-${{ matrix.host_arch }}
+          name: hedgehog-wheel-${{ matrix.host_arch }}-py${{ matrix.python_version }}
           path: dist
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python_version }}
 
       - name: Install wheel in fresh venv
         run: |
@@ -195,14 +211,23 @@ jobs:
           import glob
 
           wheels = sorted(glob.glob('dist/*.whl'))
-          if len(wheels) < 2:
-              raise SystemExit(f'Expected at least 2 wheels, got: {wheels}')
+          if len(wheels) < 4:
+              raise SystemExit(f'Expected at least 4 wheels, got: {wheels}')
 
-          required = ('x86_64', 'aarch64')
-          missing = [arch for arch in required if not any(arch in wheel for wheel in wheels)]
+          required = (
+              ('x86_64', 'cp311'),
+              ('x86_64', 'cp312'),
+              ('aarch64', 'cp311'),
+              ('aarch64', 'cp312'),
+          )
+          missing = [
+              f'{arch}/{py}'
+              for arch, py in required
+              if not any(arch in wheel and py in wheel for wheel in wheels)
+          ]
           if missing:
               raise SystemExit(
-                  f'Missing required architecture wheel(s): {missing}. Wheels: {wheels}'
+                  f'Missing required wheel(s): {missing}. Wheels: {wheels}'
               )
 
           print('Release wheel coverage check passed:', wheels)
