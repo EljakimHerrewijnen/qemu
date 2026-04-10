@@ -6,12 +6,15 @@
 
 #include "qemu/osdep.h"
 #include "qemu/accel.h"
+#include "qemu/config-file.h"
 #include "qemu/main-loop.h"
+#include "qemu/option.h"
 #include "qemu/module.h"
 #include "qemu/target-info.h"
 #include "qemu/units.h"
 #include "qom/object.h"
 #include "qapi/error.h"
+#include "chardev/char.h"
 #include "hw/core/boards.h"
 #include "hw/core/qdev.h"
 #include "hw/core/cpu.h"
@@ -19,6 +22,7 @@
 #include "system/cpus.h"
 #include "system/hedgehog-exec-hooks.h"
 #include "system/address-spaces.h"
+#include "system/system.h"
 #include "system/memory.h"
 #include "system/tcg.h"
 #include "system/hedgehog-backend.h"
@@ -27,6 +31,9 @@
 #include "hedgehog-mmio-device.h"
 
 typedef struct HedgehogInitState {
+    bool runtime_initialized;
+    bool opts_initialized;
+    bool property_binding_notifier_registered;
     bool initialized;
     bool board_initialized;
     bool board_backend_active;
@@ -35,7 +42,23 @@ typedef struct HedgehogInitState {
 
 static GMutex hedgehog_init_lock;
 static HedgehogInitState hedgehog_init_state;
-static gsize hedgehog_qom_initialized;
+
+typedef struct HedgehogChardev {
+    char *id;
+    char *label;
+    Chardev *chr;
+} HedgehogChardev;
+
+static GPtrArray *hedgehog_chardevs;
+
+typedef struct HedgehogPropertyBinding {
+    char *object_path;
+    char *property;
+    char *value;
+} HedgehogPropertyBinding;
+
+static GPtrArray *hedgehog_property_bindings;
+static NotifierWithReturn hedgehog_property_binding_notifier;
 
 typedef struct HedgehogRAMRegion {
     MemoryRegion mr;
@@ -60,6 +83,255 @@ struct HedgehogBackend {
     bool invalid_mem_seen;
     HedgehogInvalidMemInfo invalid_mem_info;
 };
+
+static void hedgehog_backend_free_property_binding(void *opaque)
+{
+    HedgehogPropertyBinding *binding = opaque;
+
+    if (!binding) {
+        return;
+    }
+
+    g_free(binding->object_path);
+    g_free(binding->property);
+    g_free(binding->value);
+    g_free(binding);
+}
+
+static char *hedgehog_backend_normalize_object_path(const char *object_path)
+{
+    return object_path[0] == '/' ?
+        g_strdup(object_path) : g_strconcat("/", object_path, NULL);
+}
+
+static HedgehogChardev *hedgehog_backend_find_chardev(const char *id)
+{
+    guint i;
+
+    if (!hedgehog_chardevs || !id) {
+        return NULL;
+    }
+
+    for (i = 0; i < hedgehog_chardevs->len; i++) {
+        HedgehogChardev *entry = g_ptr_array_index(hedgehog_chardevs, i);
+
+        if (g_strcmp0(entry->id, id) == 0) {
+            return entry;
+        }
+    }
+
+    return NULL;
+}
+
+static HedgehogPropertyBinding *hedgehog_backend_find_property_binding(
+    const char *object_path,
+    const char *property)
+{
+    guint i;
+
+    if (!hedgehog_property_bindings) {
+        return NULL;
+    }
+
+    for (i = 0; i < hedgehog_property_bindings->len; i++) {
+        HedgehogPropertyBinding *binding =
+            g_ptr_array_index(hedgehog_property_bindings, i);
+
+        if (g_strcmp0(binding->object_path, object_path) == 0 &&
+            g_strcmp0(binding->property, property) == 0) {
+            return binding;
+        }
+    }
+
+    return NULL;
+}
+
+static bool hedgehog_backend_set_property_string_locked(const char *object_path,
+                                                        const char *property,
+                                                        const char *value,
+                                                        Error **errp)
+{
+    Object *obj;
+    bool ambiguous = false;
+
+    obj = object_resolve_path(object_path, &ambiguous);
+    if (!obj) {
+        if (ambiguous) {
+            error_setg(errp, "object path '%s' is ambiguous", object_path);
+        } else {
+            error_setg(errp, "object path '%s' was not found", object_path);
+        }
+        return false;
+    }
+
+    if (!object_property_find_err(obj, property, errp)) {
+        return false;
+    }
+
+    return object_property_set_str(obj, property, value, errp);
+}
+
+static bool hedgehog_backend_apply_available_property_bindings(Error **errp)
+{
+    gint i;
+
+    if (!hedgehog_property_bindings || hedgehog_property_bindings->len == 0) {
+        return true;
+    }
+
+    for (i = hedgehog_property_bindings->len - 1; i >= 0; i--) {
+        HedgehogPropertyBinding *binding =
+            g_ptr_array_index(hedgehog_property_bindings, i);
+        bool ambiguous = false;
+
+        if (!object_resolve_path(binding->object_path, &ambiguous)) {
+            if (ambiguous) {
+                error_setg(errp, "object path '%s' is ambiguous",
+                           binding->object_path);
+                return false;
+            }
+            continue;
+        }
+
+        if (!hedgehog_backend_set_property_string_locked(binding->object_path,
+                                                         binding->property,
+                                                         binding->value,
+                                                         errp)) {
+            error_prepend(errp, "failed to bind property %s:%s=%s: ",
+                          binding->object_path, binding->property,
+                          binding->value);
+            return false;
+        }
+
+        g_ptr_array_remove_index(hedgehog_property_bindings, i);
+    }
+
+    return true;
+}
+
+static bool hedgehog_backend_require_all_property_bindings_resolved(Error **errp)
+{
+    HedgehogPropertyBinding *binding;
+
+    if (!hedgehog_property_bindings || hedgehog_property_bindings->len == 0) {
+        return true;
+    }
+
+    binding = g_ptr_array_index(hedgehog_property_bindings, 0);
+    error_setg(errp,
+               "property binding %s:%s=%s was not resolved during machine initialization",
+               binding->object_path, binding->property, binding->value);
+    return false;
+}
+
+static int hedgehog_backend_apply_bindings_to_object(Object *obj, void *opaque)
+{
+    Error **errp = opaque;
+    g_autofree char *path = object_get_canonical_path(obj);
+    gint i;
+
+    if (!path || !hedgehog_property_bindings || hedgehog_property_bindings->len == 0) {
+        return 0;
+    }
+
+    for (i = hedgehog_property_bindings->len - 1; i >= 0; i--) {
+        HedgehogPropertyBinding *binding =
+            g_ptr_array_index(hedgehog_property_bindings, i);
+
+        if (g_strcmp0(binding->object_path, path) != 0) {
+            continue;
+        }
+
+        if (!object_property_find_err(obj, binding->property, errp)) {
+            error_prepend(errp, "failed to bind property %s:%s=%s: ",
+                          binding->object_path, binding->property,
+                          binding->value);
+            return -1;
+        }
+
+        if (!object_property_set_str(obj, binding->property,
+                                     binding->value, errp)) {
+            error_prepend(errp, "failed to bind property %s:%s=%s: ",
+                          binding->object_path, binding->property,
+                          binding->value);
+            return -1;
+        }
+
+        g_ptr_array_remove_index(hedgehog_property_bindings, i);
+    }
+
+    return 0;
+}
+
+static int hedgehog_backend_on_object_initialized(NotifierWithReturn *notifier,
+                                                  void *data,
+                                                  Error **errp)
+{
+    ObjectInitializeChildEvent *event = data;
+
+    if (!hedgehog_property_bindings || hedgehog_property_bindings->len == 0) {
+        return 0;
+    }
+
+    (void)notifier;
+
+    if (hedgehog_backend_apply_bindings_to_object(event->child, errp) != 0) {
+        return -1;
+    }
+
+    if (object_child_foreach_recursive(event->child,
+                                       hedgehog_backend_apply_bindings_to_object,
+                                       errp) != 0) {
+        return -1;
+    }
+
+    if (!hedgehog_backend_apply_available_property_bindings(errp)) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static bool hedgehog_backend_ensure_runtime_initialized(Error **errp)
+{
+    Error *local_err = NULL;
+
+    g_mutex_lock(&hedgehog_init_lock);
+    if (hedgehog_init_state.runtime_initialized) {
+        g_mutex_unlock(&hedgehog_init_lock);
+        return true;
+    }
+
+    qemu_init_subsystems();
+    if (!hedgehog_init_state.opts_initialized) {
+        qemu_add_opts(&qemu_chardev_opts);
+        qemu_add_opts(&qemu_device_opts);
+        qemu_add_opts(&qemu_global_opts);
+        qemu_add_opts(&qemu_semihosting_config_opts);
+        hedgehog_init_state.opts_initialized = true;
+    }
+    if (!hedgehog_init_state.property_binding_notifier_registered) {
+        hedgehog_property_binding_notifier.notify =
+            hedgehog_backend_on_object_initialized;
+        object_add_initialize_child_notifier(&hedgehog_property_binding_notifier);
+        hedgehog_init_state.property_binding_notifier_registered = true;
+    }
+    if (qemu_init_main_loop(&local_err) < 0) {
+        bql_unlock();
+        g_mutex_unlock(&hedgehog_init_lock);
+        if (local_err) {
+            error_propagate(errp, local_err);
+        } else {
+            error_setg(errp, "failed to initialize qemu main loop");
+        }
+        return false;
+    }
+    bql_unlock();
+
+    hedgehog_init_state.runtime_initialized = true;
+    g_mutex_unlock(&hedgehog_init_lock);
+    return true;
+}
 
 static void hedgehog_backend_request_stop_from_hook(void *opaque,
                                                    HedgehogExecStopReason reason,
@@ -294,6 +566,10 @@ static bool hedgehog_backend_realize_board_machine(const char *cpu_type,
         return false;
     }
 
+    if (!hedgehog_backend_require_all_property_bindings_resolved(errp)) {
+        return false;
+    }
+
     cpu = hedgehog_backend_first_realized_cpu();
     if (!cpu) {
         error_setg(errp, "machine '%s' realized without a CPU",
@@ -314,6 +590,10 @@ bool hedgehog_backend_initialize_for_machine(const char *machine_type,
 {
     g_autofree char *requested = hedgehog_backend_canonicalize_machine_type(machine_type);
 
+    if (!hedgehog_backend_ensure_runtime_initialized(errp)) {
+        return false;
+    }
+
     g_mutex_lock(&hedgehog_init_lock);
 
     if (hedgehog_init_state.initialized) {
@@ -329,18 +609,16 @@ bool hedgehog_backend_initialize_for_machine(const char *machine_type,
         return true;
     }
 
-    if (g_once_init_enter(&hedgehog_qom_initialized)) {
-        module_call_init(MODULE_INIT_QOM);
-        g_once_init_leave(&hedgehog_qom_initialized, 1);
-    }
-
     if (!hedgehog_backend_create_machine(requested, errp)) {
         g_mutex_unlock(&hedgehog_init_lock);
         return false;
     }
 
-    qemu_init_cpu_list();
-    qemu_init_cpu_loop();
+    if (!hedgehog_backend_apply_available_property_bindings(errp)) {
+        g_mutex_unlock(&hedgehog_init_lock);
+        return false;
+    }
+
     cpu_exec_init_all();
     hedgehog_backend_init_tcg_accel();
     hedgehog_backend_advance_machine_phases();
@@ -356,6 +634,222 @@ bool hedgehog_backend_initialize_for_machine(const char *machine_type,
     g_mutex_unlock(&hedgehog_init_lock);
 
     return true;
+}
+
+bool hedgehog_backend_chardev_add(const char *id, const char *uri,
+                                  Error **errp)
+{
+    HedgehogChardev *entry;
+    Chardev *chr;
+
+    if (!id || !id[0]) {
+        error_setg(errp, "chardev id is required");
+        return false;
+    }
+
+    if (!uri || !uri[0]) {
+        error_setg(errp, "chardev uri is required");
+        return false;
+    }
+
+    if (!hedgehog_backend_ensure_runtime_initialized(errp)) {
+        return false;
+    }
+
+    BQL_LOCK_GUARD();
+
+    if (hedgehog_backend_find_chardev(id)) {
+        error_setg(errp, "hedgehog chardev '%s' already exists", id);
+        return false;
+    }
+
+    if (!hedgehog_chardevs) {
+        hedgehog_chardevs = g_ptr_array_new();
+    }
+
+    chr = qemu_chr_new_noreplay(id, uri, false, NULL);
+    if (!chr) {
+        error_setg(errp, "failed to create hedgehog chardev '%s' from '%s'",
+                   id, uri);
+        return false;
+    }
+
+    entry = g_new0(HedgehogChardev, 1);
+    entry->id = g_strdup(id);
+    entry->label = g_strdup(id);
+    entry->chr = chr;
+    g_ptr_array_add(hedgehog_chardevs, entry);
+    return true;
+}
+
+bool hedgehog_backend_bind_property(const char *object_path,
+                                    const char *property,
+                                    const char *value,
+                                    Error **errp)
+{
+    g_autofree char *normalized_path = NULL;
+    HedgehogPropertyBinding *binding;
+    bool ambiguous = false;
+
+    if (!object_path || !object_path[0]) {
+        error_setg(errp, "object_path is required");
+        return false;
+    }
+
+    if (!property || !property[0]) {
+        error_setg(errp, "property is required");
+        return false;
+    }
+
+    if (!value || !value[0]) {
+        error_setg(errp, "value is required");
+        return false;
+    }
+
+    if (!hedgehog_backend_ensure_runtime_initialized(errp)) {
+        return false;
+    }
+
+    normalized_path = hedgehog_backend_normalize_object_path(object_path);
+
+    BQL_LOCK_GUARD();
+
+    if (object_resolve_path(normalized_path, &ambiguous)) {
+        return hedgehog_backend_set_property_string_locked(normalized_path,
+                                                           property,
+                                                           value,
+                                                           errp);
+    }
+    if (ambiguous) {
+        error_setg(errp, "object path '%s' is ambiguous", normalized_path);
+        return false;
+    }
+
+    g_mutex_lock(&hedgehog_init_lock);
+    if (!hedgehog_init_state.board_initialized) {
+        if (!hedgehog_property_bindings) {
+            hedgehog_property_bindings =
+                g_ptr_array_new_with_free_func(hedgehog_backend_free_property_binding);
+        }
+
+        binding = hedgehog_backend_find_property_binding(normalized_path, property);
+        if (binding) {
+            g_mutex_unlock(&hedgehog_init_lock);
+            error_setg(errp, "property binding '%s:%s' already exists",
+                       normalized_path, property);
+            return false;
+        }
+
+        binding = g_new0(HedgehogPropertyBinding, 1);
+        binding->object_path = g_strdup(normalized_path);
+        binding->property = g_strdup(property);
+        binding->value = g_strdup(value);
+        g_ptr_array_add(hedgehog_property_bindings, binding);
+        g_mutex_unlock(&hedgehog_init_lock);
+        return true;
+    }
+    g_mutex_unlock(&hedgehog_init_lock);
+
+    return hedgehog_backend_set_property_string_locked(normalized_path, property,
+                                                       value, errp);
+}
+
+bool hedgehog_backend_chardev_attach_serial(int index, const char *id,
+                                            Error **errp)
+{
+    HedgehogChardev *entry;
+
+    if (index < 0) {
+        error_setg(errp, "serial index must be >= 0");
+        return false;
+    }
+
+    if (!id || !id[0]) {
+        error_setg(errp, "chardev id is required");
+        return false;
+    }
+
+    if (!hedgehog_backend_ensure_runtime_initialized(errp)) {
+        return false;
+    }
+
+    BQL_LOCK_GUARD();
+
+    entry = hedgehog_backend_find_chardev(id);
+    if (!entry) {
+        error_setg(errp, "unknown hedgehog chardev '%s'", id);
+        return false;
+    }
+
+    g_mutex_lock(&hedgehog_init_lock);
+    if (hedgehog_init_state.board_initialized) {
+        g_mutex_unlock(&hedgehog_init_lock);
+        error_setg(errp,
+                   "serial backends must be attached before the board machine is realized");
+        return false;
+    }
+    g_mutex_unlock(&hedgehog_init_lock);
+
+    serial_hd_set(index, entry->chr);
+    return true;
+}
+
+int hedgehog_backend_chardev_get_endpoint(const char *id, char *buf,
+                                          size_t buf_size, Error **errp)
+{
+    g_autofree char *endpoint = NULL;
+    HedgehogChardev *entry;
+    size_t required;
+
+    if (!id || !id[0]) {
+        error_setg(errp, "chardev id is required");
+        return -1;
+    }
+
+    if (!hedgehog_backend_ensure_runtime_initialized(errp)) {
+        return -1;
+    }
+
+    BQL_LOCK_GUARD();
+
+    entry = hedgehog_backend_find_chardev(id);
+    if (!entry) {
+        error_setg(errp, "unknown hedgehog chardev '%s'", id);
+        return -1;
+    }
+
+    endpoint = qemu_chr_get_pty_name(entry->chr);
+    if (!endpoint) {
+        endpoint = qemu_chr_get_filename(entry->chr);
+    }
+    if (!endpoint) {
+        error_setg(errp, "hedgehog chardev '%s' has no endpoint information", id);
+        return -1;
+    }
+
+    required = strlen(endpoint) + 1;
+    if (buf && buf_size >= required) {
+        g_strlcpy(buf, endpoint, buf_size);
+    }
+    return required;
+}
+
+int hedgehog_backend_poll_events(bool blocking, Error **errp)
+{
+    int count = 0;
+
+    if (!hedgehog_backend_ensure_runtime_initialized(errp)) {
+        return -1;
+    }
+
+    if (blocking && g_main_context_iteration(NULL, true)) {
+        count++;
+    }
+    while (g_main_context_iteration(NULL, false)) {
+        count++;
+    }
+
+    return count;
 }
 
 HedgehogBackend *hedgehog_backend_new(const char *cpu_type, Error **errp)

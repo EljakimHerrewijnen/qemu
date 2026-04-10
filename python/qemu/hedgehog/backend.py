@@ -17,7 +17,7 @@ import ctypes
 import ctypes.util
 import glob
 import os
-from typing import Any, Callable, List, Optional, Protocol, Tuple, cast
+from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, cast
 from typing import runtime_checkable
 
 from .constants import HEDGEHOG_ERR_ARG, HEDGEHOG_ERR_RESOURCE
@@ -137,6 +137,26 @@ class BackendProtocol(Protocol):
         """Request stop for the current run."""
         ...
 
+    def add_chardev(self, chardev_id: str, uri: str) -> bool:
+        """Create a named host chardev backend."""
+        ...
+
+    def bind_property(self, object_path: str, property_name: str, value: str) -> bool:
+        """Bind a string-valued QOM property to a backend or other named object."""
+        ...
+
+    def attach_serial_chardev(self, index: int, chardev_id: str) -> bool:
+        """Attach a named chardev to a legacy serial slot."""
+        ...
+
+    def get_chardev_endpoint(self, chardev_id: str) -> Optional[str]:
+        """Return endpoint metadata such as PTY path for a named chardev."""
+        ...
+
+    def poll_events(self, block: bool) -> int:
+        """Pump the backend event sources and return the number of iterations."""
+        ...
+
 
 class NativeBackend:
     """
@@ -163,6 +183,9 @@ class NativeBackend:
         cpu_type: str,
         machine_type: Optional[str] = None,
         library_path: Optional[str] = None,
+        chardevs: Optional[Dict[str, str]] = None,
+        property_bindings: Optional[Dict[str, Dict[str, str]]] = None,
+        serial_backends: Optional[Dict[int, str]] = None,
     ) -> 'NativeBackend':
         """
         Create and initialize a backend instance.
@@ -170,8 +193,63 @@ class NativeBackend:
         if not cpu_type:
             raise HedgehogError(HEDGEHOG_ERR_ARG, 'cpu_type is required')
 
+        if serial_backends and (machine_type is None or machine_type == 'none'):
+            raise HedgehogError(
+                HEDGEHOG_ERR_ARG,
+                'serial_backends require a board-backed machine_type',
+            )
+        if property_bindings and (machine_type is None or machine_type == 'none'):
+            raise HedgehogError(
+                HEDGEHOG_ERR_ARG,
+                'property_bindings require a board-backed machine_type',
+            )
+
         lib = _load_native_library(library_path)
         _configure_library_api(lib)
+
+        for chardev_id, uri in (chardevs or {}).items():
+            ok = bool(
+                lib.hedgehog_backend_chardev_add(
+                    chardev_id.encode('ascii'),
+                    uri.encode('ascii'),
+                    None,
+                )
+            )
+            if not ok:
+                raise HedgehogError(
+                    HEDGEHOG_ERR_RESOURCE,
+                    f'failed to create chardev {chardev_id}',
+                )
+
+        for object_path, bindings in (property_bindings or {}).items():
+            for property_name, value in bindings.items():
+                ok = bool(
+                    lib.hedgehog_backend_bind_property(
+                        object_path.encode('ascii'),
+                        property_name.encode('ascii'),
+                        value.encode('ascii'),
+                        None,
+                    )
+                )
+                if not ok:
+                    raise HedgehogError(
+                        HEDGEHOG_ERR_RESOURCE,
+                        f'failed to bind {object_path}:{property_name}={value}',
+                    )
+
+        for index, chardev_id in sorted((serial_backends or {}).items()):
+            ok = bool(
+                lib.hedgehog_backend_chardev_attach_serial(
+                    ctypes.c_int(index),
+                    chardev_id.encode('ascii'),
+                    None,
+                )
+            )
+            if not ok:
+                raise HedgehogError(
+                    HEDGEHOG_ERR_RESOURCE,
+                    f'failed to attach chardev {chardev_id} to serial{index}',
+                )
 
         if machine_type and hasattr(lib, 'hedgehog_backend_initialize_for_machine'):
             machine_arg = machine_type.encode('ascii')
@@ -367,6 +445,67 @@ class NativeBackend:
     def stop(self) -> None:
         self._lib.hedgehog_backend_stop(self._handle)
 
+    def add_chardev(self, chardev_id: str, uri: str) -> bool:
+        return bool(
+            self._lib.hedgehog_backend_chardev_add(
+                chardev_id.encode('ascii', 'replace'),
+                uri.encode('ascii', 'replace'),
+                None,
+            )
+        )
+
+    def bind_property(self, object_path: str, property_name: str, value: str) -> bool:
+        return bool(
+            self._lib.hedgehog_backend_bind_property(
+                object_path.encode('ascii', 'replace'),
+                property_name.encode('ascii', 'replace'),
+                value.encode('ascii', 'replace'),
+                None,
+            )
+        )
+
+    def attach_serial_chardev(self, index: int, chardev_id: str) -> bool:
+        return bool(
+            self._lib.hedgehog_backend_chardev_attach_serial(
+                ctypes.c_int(index),
+                chardev_id.encode('ascii', 'replace'),
+                None,
+            )
+        )
+
+    def get_chardev_endpoint(self, chardev_id: str) -> Optional[str]:
+        required = int(
+            self._lib.hedgehog_backend_chardev_get_endpoint(
+                chardev_id.encode('ascii', 'replace'),
+                None,
+                ctypes.c_size_t(0),
+                None,
+            )
+        )
+        if required <= 0:
+            return None
+
+        buf = ctypes.create_string_buffer(required)
+        final_size = int(
+            self._lib.hedgehog_backend_chardev_get_endpoint(
+                chardev_id.encode('ascii', 'replace'),
+                ctypes.cast(buf, ctypes.c_char_p),
+                ctypes.c_size_t(len(buf)),
+                None,
+            )
+        )
+        if final_size <= 0:
+            return None
+        return buf.value.decode('utf-8', errors='replace')
+
+    def poll_events(self, block: bool) -> int:
+        return int(
+            self._lib.hedgehog_backend_poll_events(
+                ctypes.c_bool(block),
+                None,
+            )
+        )
+
     def __del__(self) -> None:
         try:
             self.close()
@@ -476,6 +615,42 @@ def _configure_library_api(lib: ctypes.CDLL) -> None:
 
     lib.hedgehog_backend_new.argtypes = [ctypes.c_char_p, error_ptr_t]
     lib.hedgehog_backend_new.restype = ctypes.c_void_p
+
+    lib.hedgehog_backend_chardev_add.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        error_ptr_t,
+    ]
+    lib.hedgehog_backend_chardev_add.restype = ctypes.c_bool
+
+    lib.hedgehog_backend_bind_property.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        error_ptr_t,
+    ]
+    lib.hedgehog_backend_bind_property.restype = ctypes.c_bool
+
+    lib.hedgehog_backend_chardev_attach_serial.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        error_ptr_t,
+    ]
+    lib.hedgehog_backend_chardev_attach_serial.restype = ctypes.c_bool
+
+    lib.hedgehog_backend_chardev_get_endpoint.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+        error_ptr_t,
+    ]
+    lib.hedgehog_backend_chardev_get_endpoint.restype = ctypes.c_int
+
+    lib.hedgehog_backend_poll_events.argtypes = [
+        ctypes.c_bool,
+        error_ptr_t,
+    ]
+    lib.hedgehog_backend_poll_events.restype = ctypes.c_int
 
     if hasattr(lib, 'hedgehog_backend_new_with_machine'):
         lib.hedgehog_backend_new_with_machine.argtypes = [

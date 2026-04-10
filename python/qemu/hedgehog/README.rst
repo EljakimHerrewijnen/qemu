@@ -11,6 +11,9 @@ Current goals:
 - keep a low-level path close to the backend C surface;
 - allow incremental porting from Hedgehog Python code.
 
+For the full Python API reference and usage notes in Markdown form, see
+``docs.md`` in this package directory.
+
 Status notes:
 
 - the default backend implementation uses ctypes and requires a shared
@@ -26,4 +29,9 @@ Status notes:
   ``build/libqemu-hedgehog-backend.so``;
 - if ``aarch64-softmmu`` is configured, an ARM64-targeted backend is also
   emitted at ``build/libqemu-hedgehog-backend-aarch64.so``;
+- machine-backed configurations can pre-create named chardevs, bind them to
+  device properties via ``property_bindings``, and query endpoints such as PTY
+  paths through ``qemu_chardev_get_endpoint()``;
+- host-connected backends are serviced explicitly with ``qemu_events_poll()``,
+  which is useful when a guest is waiting on UART or similar device input;
 - only a subset of Hedgehog hooks is currently implemented.

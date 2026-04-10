@@ -73,6 +73,7 @@ extern unsigned int nb_prom_envs;
 
 /* Return the Chardev for serial port i, or NULL if none */
 Chardev *serial_hd(int i);
+void serial_hd_set(int i, Chardev *chr);
 
 /* parallel ports */
 

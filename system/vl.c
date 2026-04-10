@@ -1488,6 +1488,28 @@ Chardev *serial_hd(int i)
     return NULL;
 }
 
+void serial_hd_set(int i, Chardev *chr)
+{
+    int old_count;
+
+    assert(i >= 0);
+
+    old_count = num_serial_hds;
+    if (i >= num_serial_hds) {
+        serial_hds = g_renew(Chardev *, serial_hds, i + 1);
+        while (num_serial_hds <= i) {
+            serial_hds[num_serial_hds++] = NULL;
+        }
+    }
+
+    if (i >= old_count) {
+        memset(&serial_hds[old_count], 0,
+               sizeof(*serial_hds) * (num_serial_hds - old_count));
+    }
+
+    serial_hds[i] = chr;
+}
+
 static bool parallel_parse(const char *devname, Error **errp)
 {
     static int index = 0;

@@ -25,6 +25,10 @@ class FakeBackend:
         self._mapped: List[Tuple[int, int]] = []
         self._mem: Dict[int, int] = {}
         self._regs: Dict[int, bytes] = {}
+        self.chardevs: Dict[str, str] = {}
+        self.property_bindings: List[Tuple[str, str, str]] = []
+        self.serial_backends: Dict[int, str] = {}
+        self.poll_calls: List[bool] = []
 
         self.exec_sequence: List[int] = []
         self.invalid_event: Optional[Tuple[int, int, int, int]] = None
@@ -132,6 +136,27 @@ class FakeBackend:
     def stop(self) -> None:
         self.stopped = True
 
+    def add_chardev(self, chardev_id: str, uri: str) -> bool:
+        self.chardevs[chardev_id] = uri
+        return True
+
+    def bind_property(self, object_path: str, property_name: str, value: str) -> bool:
+        self.property_bindings.append((object_path, property_name, value))
+        return True
+
+    def attach_serial_chardev(self, index: int, chardev_id: str) -> bool:
+        self.serial_backends[index] = chardev_id
+        return True
+
+    def get_chardev_endpoint(self, chardev_id: str) -> Optional[str]:
+        if chardev_id not in self.chardevs:
+            return None
+        return f'endpoint:{chardev_id}'
+
+    def poll_events(self, block: bool) -> int:
+        self.poll_calls.append(block)
+        return 1
+
     def _is_mapped(self, addr: int, size: int) -> bool:
         for base, region_size in self._mapped:
             if addr >= base and (addr + size) <= (base + region_size):
@@ -219,10 +244,16 @@ def test_machine_type_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
         cpu_type: str,
         machine_type: Optional[str] = None,
         library_path: Optional[str] = None,
+        chardevs: Optional[Dict[str, str]] = None,
+        property_bindings: Optional[Dict[str, Dict[str, str]]] = None,
+        serial_backends: Optional[Dict[int, str]] = None,
     ) -> FakeBackend:
         captured['cpu_type'] = cpu_type
         captured['machine_type'] = machine_type
         captured['library_path'] = library_path
+        captured['chardevs'] = chardevs
+        captured['property_bindings'] = property_bindings
+        captured['serial_backends'] = serial_backends
         return backend
 
     monkeypatch.setattr('qemu.hedgehog.api.NativeBackend.create', fake_create)
@@ -234,4 +265,84 @@ def test_machine_type_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     assert captured['machine_type'] == 'none'
+    uc.close()
+
+
+def test_native_create_forwards_chardev_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: Dict[str, object] = {}
+    backend = FakeBackend()
+
+    def fake_create(
+        cpu_type: str,
+        machine_type: Optional[str] = None,
+        library_path: Optional[str] = None,
+        chardevs: Optional[Dict[str, str]] = None,
+        property_bindings: Optional[Dict[str, Dict[str, str]]] = None,
+        serial_backends: Optional[Dict[int, str]] = None,
+    ) -> FakeBackend:
+        captured['cpu_type'] = cpu_type
+        captured['machine_type'] = machine_type
+        captured['library_path'] = library_path
+        captured['chardevs'] = chardevs
+        captured['property_bindings'] = property_bindings
+        captured['serial_backends'] = serial_backends
+        return backend
+
+    monkeypatch.setattr('qemu.hedgehog.api.NativeBackend.create', fake_create)
+
+    uc = Hedgehog(
+        HEDGEHOG_ARCH_X86,
+        HEDGEHOG_MODE_64,
+        machine_type='none',
+        chardevs={'console': 'pty'},
+        property_bindings={'/machine/uart0': {'chardev': 'console'}},
+        serial_backends={0: 'console'},
+    )
+
+    assert captured['chardevs'] == {'console': 'pty'}
+    assert captured['property_bindings'] == {'/machine/uart0': {'chardev': 'console'}}
+    assert captured['serial_backends'] == {0: 'console'}
+    assert backend.chardevs == {}
+    assert backend.property_bindings == []
+    assert backend.serial_backends == {}
+    uc.close()
+
+
+def test_injected_backend_applies_chardev_configuration() -> None:
+    backend = FakeBackend()
+
+    uc = Hedgehog(
+        HEDGEHOG_ARCH_X86,
+        HEDGEHOG_MODE_64,
+        backend=backend,
+        chardevs={'console': 'pty'},
+        property_bindings={'/machine/uart0': {'chardev': 'console'}},
+        serial_backends={0: 'console'},
+    )
+
+    assert backend.chardevs == {'console': 'pty'}
+    assert backend.property_bindings == [('/machine/uart0', 'chardev', 'console')]
+    assert backend.serial_backends == {0: 'console'}
+    uc.close()
+
+
+def test_qemu_chardev_helpers_delegate_to_backend() -> None:
+    backend = FakeBackend()
+    uc = Hedgehog(HEDGEHOG_ARCH_X86, HEDGEHOG_MODE_64, backend=backend)
+
+    uc.qemu_chardev_add('console', 'pty')
+    uc.qemu_property_bind('/machine/uart0', 'chardev', 'console')
+    uc.qemu_chardev_bind('/machine/uart1', 'chardev', 'console')
+    uc.qemu_chardev_attach_serial(0, 'console')
+
+    assert uc.qemu_chardev_get_endpoint('console') == 'endpoint:console'
+    assert backend.property_bindings == [
+        ('/machine/uart0', 'chardev', 'console'),
+        ('/machine/uart1', 'chardev', 'console'),
+    ]
+    assert uc.qemu_events_poll() == 1
+    assert uc.qemu_events_poll(block=True) == 1
+    assert backend.poll_calls == [False, True]
     uc.close()

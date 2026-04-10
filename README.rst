@@ -64,161 +64,110 @@ Additional information can also be found online via the QEMU website:
 * `<https://wiki.qemu.org/Hosts/W32>`_
 
 
-Embedding API (Unicorn backend)
-===============================
+Embedding API (Hedgehog backend)
+================================
 
-QEMU ships an optional Unicorn-like embedding API that lets you use the
-TCG CPU emulator as a library rather than a standalone process.  It is
-designed for fuzzing, binary analysis, and unit testing of firmware.
+QEMU ships an optional Hedgehog-like embedding API that lets you use the
+TCG CPU emulator as a library rather than as a standalone process.  It is
+intended for firmware analysis, emulator-style embedding, and focused test
+harnesses.
 
 Building with the embedding API enabled
-----------------------------------------
+---------------------------------------
 
-Pass ``--enable-unicorn`` to ``configure`` together with the target
-architecture you want to embed.  Everything else compiles out when the
-option is absent.
+Pass ``--enable-hedgehog`` to ``configure`` together with the system targets
+you want to embed.  When the option is disabled, the backend compiles out.
 
 .. code-block:: shell
 
-  mkdir build
-  cd build
-  ../configure --enable-unicorn --target-list=arm-softmmu
+  mkdir build-hedgehog
+  cd build-hedgehog
+  ../configure --enable-hedgehog --target-list=x86_64-softmmu,aarch64-softmmu
   make
 
-The public header is ``include/system/unicorn-backend.h``.  Link your
-host program against the QEMU system library for the chosen target.
+The public C header is ``include/system/hedgehog-backend.h``.
 
-Board mode — bare CPU with a custom memory map
------------------------------------------------
+The build emits a loadable backend library at:
 
-Board mode gives you a single CPU and a flat address space that you
-populate yourself with RAM and MMIO regions.  It is the lightest option
-and requires no target-specific machine knowledge.
+* ``build-hedgehog/libqemu-hedgehog-backend.so``
+* ``build-hedgehog/libqemu-hedgehog-backend-aarch64.so`` when
+  ``aarch64-softmmu`` is enabled
 
-.. code-block:: c
+Board-backed mode
+-----------------
 
-  #include "system/unicorn-backend.h"
+Board-backed mode gives you a single CPU and a private address space that you
+populate yourself with RAM and MMIO callback regions.  Use it when you want a
+small emulator surface and do not need a full machine model.
 
-  /* Thumb-2 code: mov r0, #1; mov r1, #2; add r2, r0, r1; bkpt #0 */
-  static const uint8_t code[] = {
-      0x01, 0x20,             /* movs r0, #1  */
-      0x02, 0x21,             /* movs r1, #2  */
-      0x08, 0xeb, 0x01, 0x02, /* add.w r2, r0, r1 */
-      0x00, 0xbe,             /* bkpt #0      */
-  };
+The core C API supports:
 
-  int main(void)
-  {
-      Error *err = NULL;
-      UnicornBackend *uc;
-      UnicornRunResult res;
+* backend lifecycle
+* RAM and MMIO mapping
+* guest memory reads and writes
+* register access
+* bounded execution and stop requests
+* translation-block, instruction, and invalid-memory hooks
 
-      /* Create a Cortex-M3 CPU with a private address space. */
-      uc = unicorn_backend_new("cortex-m3-arm-cpu", &err);
-      if (!uc) {
-          fprintf(stderr, "create failed: %s\n", error_get_pretty(err));
-          return 1;
-      }
+Machine-backed mode
+-------------------
 
-      /* Map 1 MiB of RAM at address 0x00000000. */
-      if (!unicorn_backend_map_ram(uc, "rom", 0x00000000, 1 * 1024 * 1024, &err)) {
-          fprintf(stderr, "map_ram failed: %s\n", error_get_pretty(err));
-          return 1;
-      }
+Machine-backed mode instantiates a real QEMU machine type and uses that
+machine's existing address space and device models.  Use it when your firmware
+expects a specific board layout such as ``raspi3b``.
 
-      /* Write the machine code into guest memory. */
-      unicorn_backend_mem_write(uc, 0x00000000, code, sizeof(code));
+In this mode:
 
-      /* Thumb code: set the LSB of the PC to select Thumb mode. */
-      unicorn_backend_set_pc(uc, 0x00000001);
+* ``machine_type`` selects the board model
+* memory access goes through the machine's real device tree
+* manual ``map_ram`` and ``map_mmio`` overlays are not supported
+* changing machine type within one process is not supported reliably today
 
-      /* Run for up to 4 instructions. */
-      res = unicorn_backend_run(uc, 4, NULL);
-      printf("run result: %d, pc=0x%lx\n", res,
-             (unsigned long)unicorn_backend_get_pc(uc));
+Python API
+----------
 
-      unicorn_backend_free(uc);
-      return 0;
-  }
+QEMU also provides a Hedgehog-compatible Python package under ``python/``.
+Install it into a virtual environment with:
 
-Machine mode — full QEMU machine with pre-configured devices
--------------------------------------------------------------
+.. code-block:: shell
 
-Machine mode instantiates a real QEMU machine type (interrupt
-controllers, timers, serial ports and all) before handing control to
-you.  Use it when the firmware you are testing expects a specific board
-layout.
+  cd python
+  python3 -m venv .venv
+  source .venv/bin/activate
+  pip install -e .
 
-.. code-block:: c
+The Python entry point is ``qemu.hedgehog.Hedgehog``.  It auto-loads bundled
+or explicitly configured backend libraries via ``QEMU_HEDGEHOG_BACKEND_LIBRARY``.
+In machine-backed mode it also supports named chardev creation,
+constructor-time QOM property bindings, legacy serial-slot attachment,
+endpoint discovery for backends such as PTYs, and explicit event pumping via
+``qemu_events_poll()``.
 
-  #include "system/unicorn-backend.h"
+.. code-block:: python
 
-  int main(void)
-  {
-      Error *err = NULL;
-      UnicornBackend *uc;
-      UnicornRunResult res;
+  from qemu.hedgehog import Hedgehog, HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM
 
-      /*
-       * Boot a BBC micro:bit machine.  Pass 0 for ram_size to use the
-       * machine's default RAM configuration.
-       */
-      uc = unicorn_backend_new_machine("microbit", 0, &err);
-      if (!uc) {
-          fprintf(stderr, "create failed: %s\n", error_get_pretty(err));
-          return 1;
-      }
-
-      /*
-       * Load firmware into flash.  On the micro:bit the flash starts at
-       * 0x00000000.  unicorn_backend_mem_write() reaches the machine's
-       * global address_space_memory, so all mapped regions are visible.
-       */
-      /* unicorn_backend_mem_write(uc, 0x00000000, firmware, firmware_len); */
-
-      /* Reset the CPU and set the entry point. */
-      unicorn_backend_reset(uc);
-      unicorn_backend_set_pc(uc, 0x00000001); /* Thumb entry */
-
-      /* Run until the CPU halts, an exception fires, or the budget runs out. */
-      res = unicorn_backend_run(uc, 1000, NULL);
-      printf("run result: %d, pc=0x%lx\n", res,
-             (unsigned long)unicorn_backend_get_pc(uc));
-
-      unicorn_backend_free(uc);
-      return 0;
-  }
-
-MMIO callbacks
---------------
-
-Both modes support registering C callbacks for memory-mapped I/O ranges:
-
-.. code-block:: c
-
-  static uint64_t uart_read(void *opaque, hwaddr offset, unsigned size)
-  {
-      printf("[uart] read  offset=0x%lx size=%u\n", (unsigned long)offset, size);
-      return 0;
-  }
-
-  static void uart_write(void *opaque, hwaddr offset,
-                         uint64_t value, unsigned size)
-  {
-      printf("[uart] write offset=0x%lx val=0x%lx size=%u\n",
-             (unsigned long)offset, (unsigned long)value, size);
-  }
-
-  /* Register a 4 KiB MMIO window at 0x40000000. */
-  unicorn_backend_map_mmio(uc, "uart", 0x40000000, 0x1000,
-                           uart_read, uart_write, NULL, &err);
+  emu = Hedgehog(
+      HEDGEHOG_ARCH_ARM64,
+      HEDGEHOG_MODE_ARM,
+      cpu_type="cortex-a53",
+      machine_type="raspi3b",
+      chardevs={"console": "pty"},
+      property_bindings={
+          "/machine/soc/peripherals/uart0": {"chardev": "console"},
+      },
+  )
+  print(emu.qemu_chardev_get_endpoint("console"))
 
 Further reading
 ---------------
 
-Full design documentation including the phased implementation plan, TCG
-hook placement strategy, and an explanation of the board vs. machine mode
-trade-offs can be found in ``docs/devel/unicorn-backend.rst``.
+Additional Hedgehog documentation in this tree:
+
+* ``hedgehog.md`` for an implementation and build overview
+* ``hedgehog_quickstart.md`` for out-of-tree Python usage
+* ``python/qemu/hedgehog/docs.md`` for the Python API surface
+* ``docs/devel/hedgehog-backend.rst`` for the backend design and architecture
 
 
 Submitting patches

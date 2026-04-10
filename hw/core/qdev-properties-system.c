@@ -281,6 +281,11 @@ static void set_chr(Object *obj, Visitor *v, const char *name, void *opaque,
         return;
     }
 
+    if (!*str && fe->chr) {
+        g_free(str);
+        return;
+    }
+
     /*
      * TODO Should this really be an error?  If no, the old value
      * needs to be released before we store the new one.
@@ -548,7 +553,17 @@ void qdev_prop_set_drive(DeviceState *dev, const char *name,
 void qdev_prop_set_chr(DeviceState *dev, const char *name,
                        Chardev *value)
 {
+    g_autofree char *existing = NULL;
+
     assert(!value || value->label);
+
+    if (!value) {
+        existing = object_property_get_str(OBJECT(dev), name, NULL);
+        if (existing && existing[0]) {
+            return;
+        }
+    }
+
     object_property_set_str(OBJECT(dev), name, value ? value->label : "",
                             &error_abort);
 }

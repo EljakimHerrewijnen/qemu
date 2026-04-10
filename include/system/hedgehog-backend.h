@@ -49,6 +49,19 @@ typedef enum HedgehogRunResult {
 bool hedgehog_backend_initialize(Error **errp);
 bool hedgehog_backend_initialize_for_machine(const char *machine_type,
                                              Error **errp);
+
+bool hedgehog_backend_chardev_add(const char *id, const char *uri,
+                                  Error **errp);
+bool hedgehog_backend_bind_property(const char *object_path,
+                                    const char *property,
+                                    const char *value,
+                                    Error **errp);
+bool hedgehog_backend_chardev_attach_serial(int index, const char *id,
+                                            Error **errp);
+int hedgehog_backend_chardev_get_endpoint(const char *id, char *buf,
+                                          size_t buf_size, Error **errp);
+int hedgehog_backend_poll_events(bool blocking, Error **errp);
+
 HedgehogBackend *hedgehog_backend_new(const char *cpu_type, Error **errp);
 HedgehogBackend *hedgehog_backend_new_with_machine(const char *cpu_type,
                                                    const char *machine_type,

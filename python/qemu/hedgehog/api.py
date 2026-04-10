@@ -99,11 +99,15 @@ class Hedgehog:
         *,
         cpu_type: Optional[str] = None,
         machine_type: Optional[str] = None,
+        chardevs: Optional[Dict[str, str]] = None,
+        property_bindings: Optional[Dict[str, Dict[str, str]]] = None,
+        serial_backends: Optional[Dict[int, str]] = None,
         backend: Optional[BackendProtocol] = None,
         library_path: Optional[str] = None,
     ):
         self.arch = int(arch)
         self.mode = int(mode)
+        injected_backend = backend is not None
 
         if backend is None:
             selected_cpu = cpu_type or _default_cpu_type(self.arch, self.mode)
@@ -116,9 +120,34 @@ class Hedgehog:
                 selected_cpu,
                 machine_type=machine_type,
                 library_path=library_path,
+                chardevs=chardevs,
+                property_bindings=property_bindings,
+                serial_backends=serial_backends,
             )
 
         self._backend = backend
+
+        if injected_backend:
+            for chardev_id, uri in (chardevs or {}).items():
+                if not self._backend.add_chardev(chardev_id, uri):
+                    raise HedgehogError(
+                        HEDGEHOG_ERR_RESOURCE,
+                        f'failed to create chardev {chardev_id}',
+                    )
+            for object_path, bindings in (property_bindings or {}).items():
+                for property_name, value in bindings.items():
+                    if not self._backend.bind_property(object_path, property_name, value):
+                        raise HedgehogError(
+                            HEDGEHOG_ERR_RESOURCE,
+                            f'failed to bind {object_path}:{property_name}={value}',
+                        )
+            for index, chardev_id in sorted((serial_backends or {}).items()):
+                if not self._backend.attach_serial_chardev(index, chardev_id):
+                    raise HedgehogError(
+                        HEDGEHOG_ERR_RESOURCE,
+                        f'failed to attach chardev {chardev_id} to serial{index}',
+                    )
+
         self._hooks: Dict[int, _HookRegistration] = {}
         self._next_hook_handle = 1
         self._pending_exception: Optional[BaseException] = None
@@ -363,6 +392,50 @@ class Hedgehog:
         Run using the backend-native API and return raw status tuple.
         """
         return self._backend.run(max_instructions)
+
+    def qemu_chardev_add(self, chardev_id: str, uri: str) -> None:
+        """QEMU-specific helper to create a named chardev backend."""
+        if not self._backend.add_chardev(chardev_id, uri):
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                f'failed to create chardev {chardev_id}',
+            )
+
+    def qemu_property_bind(self, object_path: str, property_name: str, value: str) -> None:
+        """QEMU-specific helper to set a string-valued property on a QOM object."""
+        if not self._backend.bind_property(object_path, property_name, value):
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                f'failed to bind {object_path}:{property_name}={value}',
+            )
+
+    def qemu_chardev_bind(self, object_path: str, property_name: str, chardev_id: str) -> None:
+        """QEMU-specific helper to bind a named chardev to a device property."""
+        self.qemu_property_bind(object_path, property_name, chardev_id)
+
+    def qemu_chardev_attach_serial(self, index: int, chardev_id: str) -> None:
+        """QEMU-specific helper to bind a chardev to a board serial slot."""
+        if index < 0:
+            raise HedgehogError(HEDGEHOG_ERR_ARG, 'serial index must be non-negative')
+        if not self._backend.attach_serial_chardev(index, chardev_id):
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                f'failed to attach chardev {chardev_id} to serial{index}',
+            )
+
+    def qemu_chardev_get_endpoint(self, chardev_id: str) -> str:
+        """QEMU-specific helper to return endpoint metadata for a chardev."""
+        endpoint = self._backend.get_chardev_endpoint(chardev_id)
+        if endpoint is None:
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                f'failed to query chardev {chardev_id}',
+            )
+        return endpoint
+
+    def qemu_events_poll(self, block: bool = False) -> int:
+        """QEMU-specific helper to pump host-backend event sources."""
+        return self._backend.poll_events(block)
 
     def _sync_backend_hooks(self) -> None:
         has_tb = any(reg.hook_type & HEDGEHOG_HOOK_BLOCK for reg in self._hooks.values())

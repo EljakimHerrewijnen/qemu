@@ -75,6 +75,8 @@ struct TypeImpl
 };
 
 static Type type_interface;
+static NotifierWithReturnList object_initialize_child_notifiers =
+    NOTIFIER_WITH_RETURN_LIST_INITIALIZER(object_initialize_child_notifiers);
 
 static GHashTable *type_table_get(void)
 {
@@ -614,6 +616,20 @@ bool object_initialize_child_with_propsv(Object *parentobj,
 
     object_property_add_child(parentobj, propname, obj);
 
+    {
+        ObjectInitializeChildEvent event = {
+            .parent = parentobj,
+            .child = obj,
+            .name = propname,
+        };
+
+        if (notifier_with_return_list_notify(&object_initialize_child_notifiers,
+                                             &event, errp) != 0) {
+            object_unparent(obj);
+            goto out;
+        }
+    }
+
     uc = (UserCreatable *)object_dynamic_cast(obj, TYPE_USER_CREATABLE);
     if (uc) {
         if (!user_creatable_complete(uc, errp)) {
@@ -644,6 +660,16 @@ void object_initialize_child_internal(Object *parent,
 {
     object_initialize_child_with_props(parent, propname, child, size, type,
                                        &error_abort, NULL);
+}
+
+void object_add_initialize_child_notifier(NotifierWithReturn *notifier)
+{
+    notifier_with_return_list_add(&object_initialize_child_notifiers, notifier);
+}
+
+void object_remove_initialize_child_notifier(NotifierWithReturn *notifier)
+{
+    notifier_with_return_remove(notifier);
 }
 
 static inline bool object_property_is_child(ObjectProperty *prop)
@@ -1114,7 +1140,7 @@ static void object_class_foreach_tramp(gpointer key, gpointer value,
         return;
     }
 
-    if (data->implements_type && 
+    if (data->implements_type &&
         !object_class_dynamic_cast(k, data->implements_type)) {
         return;
     }

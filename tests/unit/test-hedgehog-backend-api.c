@@ -8,6 +8,17 @@ typedef int hedgehog_reg_read_sig(HedgehogBackend *uc, int regno,
 typedef int hedgehog_reg_write_sig(HedgehogBackend *uc, int regno,
                                   const uint8_t *buf, size_t buf_size,
                                   Error **errp);
+typedef bool hedgehog_chardev_add_sig(const char *id, const char *uri,
+                                      Error **errp);
+typedef bool hedgehog_bind_property_sig(const char *object_path,
+                                        const char *property,
+                                        const char *value,
+                                        Error **errp);
+typedef bool hedgehog_chardev_attach_serial_sig(int index, const char *id,
+                                                Error **errp);
+typedef int hedgehog_chardev_get_endpoint_sig(const char *id, char *buf,
+                                              size_t buf_size, Error **errp);
+typedef int hedgehog_poll_events_sig(bool blocking, Error **errp);
 typedef HedgehogBackend *hedgehog_new_with_machine_sig(const char *cpu_type,
                                                       const char *machine_type,
                                                       Error **errp);
@@ -18,6 +29,23 @@ _Static_assert(__builtin_types_compatible_p(__typeof__(hedgehog_backend_reg_read
 _Static_assert(__builtin_types_compatible_p(__typeof__(hedgehog_backend_reg_write),
                                             hedgehog_reg_write_sig),
                "hedgehog_backend_reg_write signature mismatch");
+_Static_assert(__builtin_types_compatible_p(__typeof__(hedgehog_backend_chardev_add),
+                                            hedgehog_chardev_add_sig),
+               "hedgehog_backend_chardev_add signature mismatch");
+_Static_assert(__builtin_types_compatible_p(__typeof__(hedgehog_backend_bind_property),
+                                            hedgehog_bind_property_sig),
+               "hedgehog_backend_bind_property signature mismatch");
+_Static_assert(__builtin_types_compatible_p(
+                   __typeof__(hedgehog_backend_chardev_attach_serial),
+                   hedgehog_chardev_attach_serial_sig),
+               "hedgehog_backend_chardev_attach_serial signature mismatch");
+_Static_assert(__builtin_types_compatible_p(
+                   __typeof__(hedgehog_backend_chardev_get_endpoint),
+                   hedgehog_chardev_get_endpoint_sig),
+               "hedgehog_backend_chardev_get_endpoint signature mismatch");
+_Static_assert(__builtin_types_compatible_p(__typeof__(hedgehog_backend_poll_events),
+                                            hedgehog_poll_events_sig),
+               "hedgehog_backend_poll_events signature mismatch");
 _Static_assert(__builtin_types_compatible_p(
                    __typeof__(hedgehog_backend_new_with_machine),
                    hedgehog_new_with_machine_sig),
