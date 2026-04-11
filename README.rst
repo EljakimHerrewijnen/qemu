@@ -175,6 +175,23 @@ This fork also provides a Hedgehog-compatible Python package under
   source .venv/bin/activate
   pip install -e .
 
+For a quick install of the latest GitHub release wheel on Linux
+``x86_64``/``aarch64`` with Python 3.11 or 3.12:
+
+.. code-block:: shell
+
+  python3 -c "import json,platform,subprocess,sys,urllib.request; arch={'x86_64':'x86_64','aarch64':'aarch64','arm64':'aarch64'}[platform.machine()]; py=f'cp{sys.version_info.major}{sys.version_info.minor}'; rel=json.load(urllib.request.urlopen('https://api.github.com/repos/EljakimHerrewijnen/qemu/releases/latest')); url=next(a['browser_download_url'] for a in rel['assets'] if a['name'].endswith('.whl') and arch in a['name'] and py in a['name']); subprocess.check_call([sys.executable, '-m', 'pip', 'install', url])"
+
+If you already know the exact release asset you want, ``pip`` can also install
+the wheel directly from the GitHub Releases URL:
+
+.. code-block:: shell
+
+  python3 -m pip install "https://github.com/EljakimHerrewijnen/qemu/releases/download/v0.1.1a7/qemu-10.2.92-cp312-cp312-linux_x86_64.whl"
+
+That direct URL form is the shortest option, but it is specific to one Python
+ABI, one CPU architecture, and one tagged release asset.
+
 The Python entry point is ``qemu.hedgehog.Hedgehog``.  It auto-loads bundled
 or explicitly configured backend libraries via ``QEMU_HEDGEHOG_BACKEND_LIBRARY``.
 In machine-backed mode it also supports named chardev creation,
