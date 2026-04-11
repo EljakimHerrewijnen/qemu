@@ -20,6 +20,7 @@ from .constants import (
     QEMU_HEDGEHOG_MEM_ACCESS_FETCH,
     QEMU_HEDGEHOG_MEM_ACCESS_READ,
     QEMU_HEDGEHOG_MEM_ACCESS_WRITE,
+    QEMU_HEDGEHOG_RUN_BUDGET_EXHAUSTED,
     QEMU_HEDGEHOG_RUN_EXCEPTION,
     QEMU_HEDGEHOG_RUN_INVALID_MEMORY,
     HEDGEHOG_ARCH_X86,
@@ -57,11 +58,17 @@ _MEM_INVALID_MASK = (
     HEDGEHOG_HOOK_MEM_FETCH_UNMAPPED
 )
 
-_SUPPORTED_HOOK_MASK = (
+_EXEC_HOOK_MASK = (
     HEDGEHOG_HOOK_BLOCK |
-    HEDGEHOG_HOOK_CODE |
+    HEDGEHOG_HOOK_CODE
+)
+
+_SUPPORTED_HOOK_MASK = (
+    _EXEC_HOOK_MASK |
     _MEM_INVALID_MASK
 )
+
+_UNBOUNDED_EXEC_HOOK_RUN_CHUNK = 0x1000
 
 _DEFAULT_CPU_TYPES = {
     (HEDGEHOG_ARCH_X86, HEDGEHOG_MODE_16): 'qemu64-x86_64-cpu',
@@ -357,8 +364,16 @@ class Hedgehog:
             )
 
         try:
-            budget = int(count) if count > 0 else 0
-            run_result, _cpu_exit = self._backend.run(budget)
+            if count > 0:
+                run_result, _cpu_exit = self._backend.run(int(count))
+            elif any(reg.hook_type & _EXEC_HOOK_MASK for reg in self._hooks.values()):
+                run_result = QEMU_HEDGEHOG_RUN_BUDGET_EXHAUSTED
+                while run_result == QEMU_HEDGEHOG_RUN_BUDGET_EXHAUSTED:
+                    run_result, _cpu_exit = self._backend.run(
+                        _UNBOUNDED_EXEC_HOOK_RUN_CHUNK,
+                    )
+            else:
+                run_result, _cpu_exit = self._backend.run(0)
         finally:
             if until_handle is not None and until_handle in self._hooks:
                 self.hook_del(until_handle)

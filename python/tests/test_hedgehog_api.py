@@ -33,6 +33,8 @@ class FakeBackend:
         self.exec_sequence: List[int] = []
         self.invalid_event: Optional[Tuple[int, int, int, int]] = None
         self.run_result = QEMU_HEDGEHOG_RUN_BUDGET_EXHAUSTED
+        self.run_budgets: List[int] = []
+        self.unbounded_exec_requires_budget_for_hooks = False
 
         self.tb_hook: Optional[Callable[[int], bool]] = None
         self.insn_hook: Optional[Callable[[int], bool]] = None
@@ -114,18 +116,19 @@ class FakeBackend:
         return self.pc
 
     def run(self, max_instructions: int) -> Tuple[int, int]:
-        del max_instructions
+        self.run_budgets.append(max_instructions)
 
         if self.invalid_event is not None and self.invalid_hook is not None:
             stop = self.invalid_hook(*self.invalid_event)
             if stop:
                 return QEMU_HEDGEHOG_RUN_INVALID_MEMORY, 0
 
-        for pc in self.exec_sequence:
-            if self.tb_hook is not None and self.tb_hook(pc):
-                return QEMU_HEDGEHOG_RUN_STOP_REQUESTED, 0
-            if self.insn_hook is not None and self.insn_hook(pc):
-                return QEMU_HEDGEHOG_RUN_STOP_REQUESTED, 0
+        if not (max_instructions == 0 and self.unbounded_exec_requires_budget_for_hooks):
+            for pc in self.exec_sequence:
+                if self.tb_hook is not None and self.tb_hook(pc):
+                    return QEMU_HEDGEHOG_RUN_STOP_REQUESTED, 0
+                if self.insn_hook is not None and self.insn_hook(pc):
+                    return QEMU_HEDGEHOG_RUN_STOP_REQUESTED, 0
 
         if self.stopped:
             self.stopped = False
@@ -189,6 +192,26 @@ def test_code_hook_dispatch_and_until_stop() -> None:
     uc.emu_start(0x2000, 0x2004)
 
     assert seen == [0x2000, 0x2004]
+
+
+def test_code_hook_dispatch_with_unbounded_run_uses_chunked_budget() -> None:
+    backend = FakeBackend()
+    backend.exec_sequence = [0x1000, 0x1004, 0x1008, 0x100c]
+    backend.unbounded_exec_requires_budget_for_hooks = True
+
+    uc = Hedgehog(HEDGEHOG_ARCH_X86, HEDGEHOG_MODE_64, backend=backend)
+    seen: List[int] = []
+
+    def code_hook(_uc: Hedgehog, address: int, _size: int, _user_data: object) -> bool:
+        seen.append(address)
+        return len(seen) >= 3
+
+    uc.hook_add(HEDGEHOG_HOOK_CODE, code_hook, begin=0x1000, end=0x1010)
+    uc.emu_start(0x1000, 0)
+
+    assert seen == [0x1000, 0x1004, 0x1008]
+    assert backend.run_budgets
+    assert all(budget > 0 for budget in backend.run_budgets)
 
 
 def test_invalid_mem_raises_ucerror() -> None:
