@@ -2,7 +2,10 @@
 QEMU README
 ===========
 
-QEMU is a generic and open source machine & userspace emulator and
+This repository is a fork of QEMU.  It follows upstream QEMU closely while
+carrying an additional in-tree addon named ``hedgehog``.
+
+Upstream QEMU is a generic and open source machine & userspace emulator and
 virtualizer.
 
 QEMU is capable of emulating a complete machine in software without any
@@ -26,6 +29,35 @@ It also aims to facilitate integration into higher level management
 layers, by providing a stable command line interface and monitor API.
 It is commonly invoked indirectly via the libvirt library when using
 open source applications such as oVirt, OpenStack and virt-manager.
+
+About This Fork
+===============
+
+This fork is intended to stay close to the official QEMU repository while
+adding Hedgehog-specific embedding support.
+
+In practice that means:
+
+* the repository still contains the normal QEMU codebase and build system;
+* upstream QEMU remains the reference project for the core emulator;
+* this fork carries Hedgehog changes on top, and tries to keep tracking
+  upstream QEMU rather than diverging into a separate emulator;
+* large parts of the Hedgehog code were generated or iterated with LLM
+  assistance, so the feature should be treated as experimental and reviewed
+  with extra care.
+
+Hedgehog is the main reason this fork exists.  It adds a Unicorn-like C and
+Python embedding API so QEMU can be driven as a library instead of only as a
+standalone process.
+
+The current Hedgehog goal is to make QEMU usable as a Python module for tasks
+such as:
+
+* mapping memory and loading guest code;
+* reading and writing registers and memory;
+* running for bounded instruction budgets to approximate stepping;
+* adding execution and invalid-memory hooks;
+* reusing selected QEMU machine models and device trees from Python.
 
 QEMU as a whole is released under the GNU General Public License,
 version 2. For full licensing details, consult the LICENSE file.
@@ -67,10 +99,14 @@ Additional information can also be found online via the QEMU website:
 Embedding API (Hedgehog backend)
 ================================
 
-QEMU ships an optional Hedgehog-like embedding API that lets you use the
-TCG CPU emulator as a library rather than as a standalone process.  It is
-intended for firmware analysis, emulator-style embedding, and focused test
-harnesses.
+This fork adds an optional Hedgehog backend that lets you use QEMU's TCG CPU
+emulation as a library rather than only as a standalone process.  It is aimed
+at firmware analysis, emulator-style embedding, architecture experiments, and
+focused test harnesses.
+
+The Python layer exposes a Unicorn-like API under ``qemu.hedgehog``.  It is
+meant to feel familiar for scripted emulation workloads while still reusing
+QEMU CPUs, memory handling, and selected board/device models.
 
 Building with the embedding API enabled
 ---------------------------------------
@@ -109,6 +145,9 @@ The core C API supports:
 * bounded execution and stop requests
 * translation-block, instruction, and invalid-memory hooks
 
+The bounded-run interface is also the current way to do stepping-style control
+from Python: run for a small instruction budget, inspect state, then continue.
+
 Machine-backed mode
 -------------------
 
@@ -126,8 +165,8 @@ In this mode:
 Python API
 ----------
 
-QEMU also provides a Hedgehog-compatible Python package under ``python/``.
-Install it into a virtual environment with:
+This fork also provides a Hedgehog-compatible Python package under
+``python/``.  Install it into a virtual environment with:
 
 .. code-block:: shell
 
