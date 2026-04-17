@@ -42,6 +42,7 @@ _INVALID_HOOK_BRIDGE = ctypes.CFUNCTYPE(
     ctypes.c_uint64,
     ctypes.c_uint,
     ctypes.c_uint,
+    ctypes.c_uint,
     ctypes.c_void_p,
 )
 

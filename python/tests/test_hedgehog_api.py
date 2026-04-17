@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, cast
 
 import pytest
 
 from qemu.hedgehog import Hedgehog, HedgehogError
+from qemu.hedgehog.backend import _maybe_wrap_invalid_hook
 from qemu.hedgehog.constants import (
     QEMU_MEMTX_DECODE_ERROR,
     QEMU_MEMTX_OK,
@@ -257,6 +258,22 @@ def test_invalid_mem_hook_can_continue() -> None:
     uc.hook_add(HEDGEHOG_HOOK_MEM_READ_UNMAPPED, invalid_hook)
 
     uc.emu_start(0x4000, 0)
+
+
+def test_invalid_mem_bridge_forwards_response_argument() -> None:
+    seen: List[Tuple[int, int, int, int]] = []
+
+    def invalid_hook(addr: int, size: int, access_type: int, response: int) -> bool:
+        seen.append((addr, size, access_type, response))
+        return True
+
+    bridge = _maybe_wrap_invalid_hook(invalid_hook)
+    assert bridge is not None
+
+    result = cast(Callable[..., bool], bridge)(0, 0x1234, 8, 2, 99, 0)
+
+    assert result is True
+    assert seen == [(0x1234, 8, 2, 99)]
 
 
 def test_machine_type_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:

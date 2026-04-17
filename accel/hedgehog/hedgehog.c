@@ -1101,7 +1101,7 @@ bool hedgehog_backend_map_mmio(HedgehogBackend *uc, const char *name,
                                   name ?: "hedgehog-mmio",
                                   size, read_fn, write_fn, opaque);
 
-    if (!qdev_realize(DEVICE(obj), NULL, errp)) {
+    if (!sysbus_realize(SYS_BUS_DEVICE(obj), errp)) {
         object_unref(obj);
         return false;
     }
