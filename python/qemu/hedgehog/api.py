@@ -9,8 +9,9 @@ Hedgehog-style Python API on top of QEMU's in-tree backend API.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, Optional, Set, Tuple, Union
 
 from .backend import BackendProtocol, NativeBackend
 from .constants import (
@@ -70,6 +71,18 @@ _SUPPORTED_HOOK_MASK = (
 
 _UNBOUNDED_EXEC_HOOK_RUN_CHUNK = 0x1000
 
+_COVERAGE_MODE_BLOCK = 'block'
+_COVERAGE_MODE_INSN = 'insn'
+_COVERAGE_MODE_DIGEST = 'digest'
+_COVERAGE_MODE_EDGE_DIGEST = 'edge_digest'
+
+_COVERAGE_MODES = {
+    _COVERAGE_MODE_BLOCK,
+    _COVERAGE_MODE_INSN,
+    _COVERAGE_MODE_DIGEST,
+    _COVERAGE_MODE_EDGE_DIGEST,
+}
+
 _DEFAULT_CPU_TYPES = {
     (HEDGEHOG_ARCH_X86, HEDGEHOG_MODE_16): 'qemu64-x86_64-cpu',
     (HEDGEHOG_ARCH_X86, HEDGEHOG_MODE_32): 'qemu64-x86_64-cpu',
@@ -111,6 +124,7 @@ class Hedgehog:
         serial_backends: Optional[Dict[int, str]] = None,
         backend: Optional[BackendProtocol] = None,
         library_path: Optional[str] = None,
+        coverage: Union[bool, str, Iterable[str]] = False,
     ):
         self.arch = int(arch)
         self.mode = int(mode)
@@ -159,6 +173,15 @@ class Hedgehog:
         self._next_hook_handle = 1
         self._pending_exception: Optional[BaseException] = None
         self._last_invalid_access: Optional[int] = None
+
+        self._coverage_modes = _normalize_coverage_modes(coverage)
+        self._coverage_block_pcs: Set[int] = set()
+        self._coverage_insn_pcs: Set[int] = set()
+        self._coverage_edges: Set[Tuple[int, int]] = set()
+        self._coverage_prev_block_pc: Optional[int] = None
+        self._coverage_prev_insn_pc: Optional[int] = None
+
+        self._sync_backend_hooks()
 
     def close(self) -> None:
         """Close the backend and release resources."""
@@ -366,7 +389,11 @@ class Hedgehog:
         try:
             if count > 0:
                 run_result, _cpu_exit = self._backend.run(int(count))
-            elif any(reg.hook_type & _EXEC_HOOK_MASK for reg in self._hooks.values()):
+            elif (
+                any(reg.hook_type & _EXEC_HOOK_MASK for reg in self._hooks.values()) or
+                self._coverage_needs_tb() or
+                self._coverage_needs_insn()
+            ):
                 run_result = QEMU_HEDGEHOG_RUN_BUDGET_EXHAUSTED
                 while run_result == QEMU_HEDGEHOG_RUN_BUDGET_EXHAUSTED:
                     run_result, _cpu_exit = self._backend.run(
@@ -452,10 +479,65 @@ class Hedgehog:
         """QEMU-specific helper to pump host-backend event sources."""
         return self._backend.poll_events(block)
 
+    def clear_coverage(self) -> None:
+        """Reset all collected coverage state."""
+        self._coverage_block_pcs.clear()
+        self._coverage_insn_pcs.clear()
+        self._coverage_edges.clear()
+        self._coverage_prev_block_pc = None
+        self._coverage_prev_insn_pc = None
+
+    def reset_coverage(self) -> None:
+        """Alias for clear_coverage()."""
+        self.clear_coverage()
+
+    def get_coverage(self) -> Dict[str, Union[Set[int], str, int, Tuple[str, ...]]]:
+        """
+        Return collected coverage artifacts for enabled coverage modes.
+        """
+        result: Dict[str, Union[Set[int], str, int, Tuple[str, ...]]] = {
+            'modes': tuple(sorted(self._coverage_modes)),
+        }
+
+        if _COVERAGE_MODE_BLOCK in self._coverage_modes:
+            result['blocks'] = set(self._coverage_block_pcs)
+            result['unique_blocks'] = len(self._coverage_block_pcs)
+
+        if _COVERAGE_MODE_INSN in self._coverage_modes:
+            result['insn'] = set(self._coverage_insn_pcs)
+            result['unique_insn'] = len(self._coverage_insn_pcs)
+
+        if _COVERAGE_MODE_DIGEST in self._coverage_modes:
+            result['coverage_digest'] = self.get_coverage_digest()
+
+        if _COVERAGE_MODE_EDGE_DIGEST in self._coverage_modes:
+            result['edge_digest'] = self.get_edge_digest()
+            result['unique_edges'] = len(self._coverage_edges)
+
+        return result
+
+    def get_coverage_digest(self) -> str:
+        """Return a stable digest of covered block addresses."""
+        h = hashlib.blake2b(digest_size=16)
+        for pc in sorted(self._coverage_block_pcs):
+            h.update(int(pc).to_bytes(8, byteorder='little', signed=False))
+        return h.hexdigest()
+
+    def get_edge_digest(self) -> str:
+        """Return a stable digest of observed execution edges."""
+        h = hashlib.blake2b(digest_size=16)
+        for src, dst in sorted(self._coverage_edges):
+            h.update(int(src).to_bytes(8, byteorder='little', signed=False))
+            h.update(int(dst).to_bytes(8, byteorder='little', signed=False))
+        return h.hexdigest()
+
     def _sync_backend_hooks(self) -> None:
         has_tb = any(reg.hook_type & HEDGEHOG_HOOK_BLOCK for reg in self._hooks.values())
         has_insn = any(reg.hook_type & HEDGEHOG_HOOK_CODE for reg in self._hooks.values())
         has_invalid = any(reg.hook_type & _MEM_INVALID_MASK for reg in self._hooks.values())
+
+        has_tb = has_tb or self._coverage_needs_tb()
+        has_insn = has_insn or self._coverage_needs_insn()
 
         self._backend.set_tb_hook(self._dispatch_tb if has_tb else None)
         self._backend.set_insn_hook(self._dispatch_insn if has_insn else None)
@@ -470,6 +552,8 @@ class Hedgehog:
         return self._dispatch_exec(HEDGEHOG_HOOK_CODE, pc)
 
     def _dispatch_exec(self, hook_family: int, pc: int) -> bool:
+        self._record_coverage(hook_family, int(pc))
+
         should_stop = False
 
         for reg in tuple(self._hooks.values()):
@@ -487,6 +571,39 @@ class Hedgehog:
             should_stop = should_stop or bool(ret)
 
         return should_stop
+
+    def _coverage_needs_tb(self) -> bool:
+        return (
+            _COVERAGE_MODE_BLOCK in self._coverage_modes or
+            (_COVERAGE_MODE_EDGE_DIGEST in self._coverage_modes and
+             _COVERAGE_MODE_INSN not in self._coverage_modes)
+        )
+
+    def _coverage_needs_insn(self) -> bool:
+        return _COVERAGE_MODE_INSN in self._coverage_modes
+
+    def _record_coverage(self, hook_family: int, pc: int) -> None:
+        if hook_family == HEDGEHOG_HOOK_BLOCK and _COVERAGE_MODE_BLOCK in self._coverage_modes:
+            self._coverage_block_pcs.add(pc)
+        if hook_family == HEDGEHOG_HOOK_CODE and _COVERAGE_MODE_INSN in self._coverage_modes:
+            self._coverage_insn_pcs.add(pc)
+
+        if _COVERAGE_MODE_EDGE_DIGEST not in self._coverage_modes:
+            return
+
+        if _COVERAGE_MODE_INSN in self._coverage_modes:
+            if hook_family != HEDGEHOG_HOOK_CODE:
+                return
+            if self._coverage_prev_insn_pc is not None:
+                self._coverage_edges.add((self._coverage_prev_insn_pc, pc))
+            self._coverage_prev_insn_pc = pc
+            return
+
+        if hook_family != HEDGEHOG_HOOK_BLOCK:
+            return
+        if self._coverage_prev_block_pc is not None:
+            self._coverage_edges.add((self._coverage_prev_block_pc, pc))
+        self._coverage_prev_block_pc = pc
 
     def _dispatch_invalid_mem(
         self,
@@ -583,6 +700,29 @@ def _memtx_error(result: int, is_write: bool, is_fetch: bool) -> HedgehogError:
     if is_fetch:
         return HedgehogError(HEDGEHOG_ERR_FETCH_UNMAPPED)
     return HedgehogError(HEDGEHOG_ERR_READ_UNMAPPED)
+
+
+def _normalize_coverage_modes(coverage: Union[bool, str, Iterable[str]]) -> Set[str]:
+    if coverage is False:
+        return set()
+
+    if coverage is True:
+        return {_COVERAGE_MODE_BLOCK}
+
+    if isinstance(coverage, str):
+        modes = {coverage}
+    else:
+        modes = {str(mode) for mode in coverage}
+
+    invalid = modes - _COVERAGE_MODES
+    if invalid:
+        invalid_str = ', '.join(sorted(invalid))
+        raise HedgehogError(
+            HEDGEHOG_ERR_ARG,
+            f'invalid coverage mode(s): {invalid_str}',
+        )
+
+    return modes
 
 
 __all__ = (

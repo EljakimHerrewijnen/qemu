@@ -36,6 +36,8 @@ class FakeBackend:
         self.run_result = QEMU_HEDGEHOG_RUN_BUDGET_EXHAUSTED
         self.run_budgets: List[int] = []
         self.unbounded_exec_requires_budget_for_hooks = False
+        self._exec_sequence_exhausted = False
+        self._last_exec_sequence: List[int] = []
 
         self.tb_hook: Optional[Callable[[int], bool]] = None
         self.insn_hook: Optional[Callable[[int], bool]] = None
@@ -119,21 +121,43 @@ class FakeBackend:
     def run(self, max_instructions: int) -> Tuple[int, int]:
         self.run_budgets.append(max_instructions)
 
+        # Reset exhausted state if the exec_sequence has changed
+        if self.exec_sequence != self._last_exec_sequence:
+            self._exec_sequence_exhausted = False
+            self._last_exec_sequence = list(self.exec_sequence)
+
         if self.invalid_event is not None and self.invalid_hook is not None:
             stop = self.invalid_hook(*self.invalid_event)
             if stop:
                 return QEMU_HEDGEHOG_RUN_INVALID_MEMORY, 0
 
-        if not (max_instructions == 0 and self.unbounded_exec_requires_budget_for_hooks):
+        # For unbounded execution with hooks: execute sequence on first call only,
+        # but skip if max_instructions == 0 (caller should use non-zero budget)
+        should_exec_sequence = True
+        if max_instructions == 0 and self.unbounded_exec_requires_budget_for_hooks:
+            should_exec_sequence = False
+        elif self.unbounded_exec_requires_budget_for_hooks and self._exec_sequence_exhausted:
+            should_exec_sequence = False
+
+        if should_exec_sequence:
             for pc in self.exec_sequence:
                 if self.tb_hook is not None and self.tb_hook(pc):
                     return QEMU_HEDGEHOG_RUN_STOP_REQUESTED, 0
                 if self.insn_hook is not None and self.insn_hook(pc):
                     return QEMU_HEDGEHOG_RUN_STOP_REQUESTED, 0
+            # Mark sequence as exhausted after processing
+            if self.unbounded_exec_requires_budget_for_hooks:
+                self._exec_sequence_exhausted = True
 
         if self.stopped:
             self.stopped = False
             return QEMU_HEDGEHOG_RUN_STOP_REQUESTED, 0
+
+        # If sequence is exhausted and we would return BUDGET_EXHAUSTED,
+        # return the final result instead to break the chunked execution loop
+        if self.unbounded_exec_requires_budget_for_hooks and self._exec_sequence_exhausted:
+            if self.run_result == QEMU_HEDGEHOG_RUN_BUDGET_EXHAUSTED:
+                return QEMU_HEDGEHOG_RUN_STOP_REQUESTED, 0
 
         return self.run_result, 0
 
@@ -274,6 +298,112 @@ def test_invalid_mem_bridge_forwards_response_argument() -> None:
 
     assert result is True
     assert seen == [(0x1234, 8, 2, 99)]
+
+
+def test_coverage_block_mode_collects_unique_blocks() -> None:
+    backend = FakeBackend()
+    backend.exec_sequence = [0x1000, 0x1004, 0x1000]
+    backend.unbounded_exec_requires_budget_for_hooks = True
+
+    uc = Hedgehog(HEDGEHOG_ARCH_X86, HEDGEHOG_MODE_64, backend=backend, coverage='block')
+    uc.emu_start(0x1000, 0)
+
+    cov = uc.get_coverage()
+    assert cov['modes'] == ('block',)
+    assert cov['blocks'] == {0x1000, 0x1004}
+    assert cov['unique_blocks'] == 2
+
+
+def test_coverage_insn_mode_collects_unique_instructions() -> None:
+    backend = FakeBackend()
+    backend.exec_sequence = [0x2000, 0x2004, 0x2008, 0x2004]
+    backend.unbounded_exec_requires_budget_for_hooks = True
+
+    uc = Hedgehog(HEDGEHOG_ARCH_X86, HEDGEHOG_MODE_64, backend=backend, coverage='insn')
+    uc.emu_start(0x2000, 0)
+
+    cov = uc.get_coverage()
+    assert cov['modes'] == ('insn',)
+    assert cov['insn'] == {0x2000, 0x2004, 0x2008}
+    assert cov['unique_insn'] == 3
+
+
+def test_coverage_digest_and_edge_digest_modes() -> None:
+    backend = FakeBackend()
+    backend.exec_sequence = [0x3000, 0x3004, 0x3008]
+    backend.unbounded_exec_requires_budget_for_hooks = True
+
+    uc = Hedgehog(
+        HEDGEHOG_ARCH_X86,
+        HEDGEHOG_MODE_64,
+        backend=backend,
+        coverage=('block', 'digest', 'edge_digest'),
+    )
+    uc.emu_start(0x3000, 0)
+
+    cov = uc.get_coverage()
+    assert cov['unique_blocks'] == 3
+    assert cov['unique_edges'] == 2
+    assert isinstance(cov['coverage_digest'], str)
+    assert isinstance(cov['edge_digest'], str)
+    assert len(cov['coverage_digest']) == 32
+    assert len(cov['edge_digest']) == 32
+
+    old_cov_digest = uc.get_coverage_digest()
+    old_edge_digest = uc.get_edge_digest()
+
+    backend.exec_sequence = [0x3000, 0x3004, 0x3008, 0x3010]
+    uc.emu_start(0x3000, 0)
+
+    assert uc.get_coverage_digest() != old_cov_digest
+    assert uc.get_edge_digest() != old_edge_digest
+
+
+def test_clear_coverage_resets_collected_data() -> None:
+    backend = FakeBackend()
+    backend.exec_sequence = [0x4000, 0x4004]
+    backend.unbounded_exec_requires_budget_for_hooks = True
+
+    uc = Hedgehog(
+        HEDGEHOG_ARCH_X86,
+        HEDGEHOG_MODE_64,
+        backend=backend,
+        coverage=('block', 'digest', 'edge_digest'),
+    )
+    uc.emu_start(0x4000, 0)
+    assert uc.get_coverage()['unique_blocks'] == 2
+
+    uc.clear_coverage()
+    cov = uc.get_coverage()
+    assert cov['unique_blocks'] == 0
+    assert cov['unique_edges'] == 0
+
+
+def test_reset_coverage_alias_resets_collected_data() -> None:
+    backend = FakeBackend()
+    backend.exec_sequence = [0x5000, 0x5004]
+    backend.unbounded_exec_requires_budget_for_hooks = True
+
+    uc = Hedgehog(
+        HEDGEHOG_ARCH_X86,
+        HEDGEHOG_MODE_64,
+        backend=backend,
+        coverage=('block', 'digest', 'edge_digest'),
+    )
+    uc.emu_start(0x5000, 0)
+    assert uc.get_coverage()['unique_blocks'] == 2
+
+    uc.reset_coverage()
+    cov = uc.get_coverage()
+    assert cov['unique_blocks'] == 0
+    assert cov['unique_edges'] == 0
+
+
+def test_invalid_coverage_mode_raises() -> None:
+    backend = FakeBackend()
+
+    with pytest.raises(HedgehogError):
+        Hedgehog(HEDGEHOG_ARCH_X86, HEDGEHOG_MODE_64, backend=backend, coverage='nope')
 
 
 def test_machine_type_is_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
