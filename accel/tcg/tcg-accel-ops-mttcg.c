@@ -115,6 +115,7 @@ static void *mttcg_cpu_thread_fn(void *arg)
     } while (!cpu->unplug || cpu_can_run(cpu));
 
     tcg_cpu_destroy(cpu);
+    tcg_unregister_thread();
     bql_unlock();
     rcu_remove_force_rcu_notifier(&force_rcu.notifier);
     rcu_unregister_thread();

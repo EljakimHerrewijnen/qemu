@@ -10,6 +10,7 @@
 #include "qemu/main-loop.h"
 #include "qemu/option.h"
 #include "qemu/module.h"
+#include "qemu/rcu.h"
 #include "qemu/target-info.h"
 #include "qemu/units.h"
 #include "qom/object.h"
@@ -981,6 +982,7 @@ HedgehogBackend *hedgehog_backend_new_with_machine(const char *cpu_type,
 void hedgehog_backend_free(HedgehogBackend *uc)
 {
     guint i;
+    bool wait_for_rcu = false;
 
     BQL_LOCK_GUARD();
 
@@ -990,7 +992,11 @@ void hedgehog_backend_free(HedgehogBackend *uc)
 
     if (uc->cpu) {
         hedgehog_exec_hook_unregister_backend(uc->cpu);
-        cpu_exit(uc->cpu);
+        if (uc->owns_cpu && qemu_tcg_mttcg_enabled()) {
+            cpu_remove_sync(uc->cpu);
+        } else {
+            cpu_exit(uc->cpu);
+        }
         if (uc->owns_cpu && DEVICE(uc->cpu)->realized) {
             qdev_unrealize(DEVICE(uc->cpu));
         }
@@ -1026,9 +1032,16 @@ void hedgehog_backend_free(HedgehogBackend *uc)
 
     if (uc->owns_address_space) {
         address_space_destroy(&uc->as);
+        wait_for_rcu = true;
     }
     if (uc->owns_memory_root) {
         object_unparent(OBJECT(&uc->root));
+    }
+
+    if (wait_for_rcu) {
+        /* uc->as is embedded in uc, so delay freeing uc until the RCU
+         * callback scheduled by address_space_destroy() has completed. */
+        synchronize_rcu();
     }
 
     g_ptr_array_free(uc->mmio_mappings, true);

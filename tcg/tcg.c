@@ -238,6 +238,7 @@ static TCGAtomAlign atom_and_align_for_opc(TCGContext *s, MemOp opc,
 
 TCGContext tcg_init_ctx;
 __thread TCGContext *tcg_ctx;
+static __thread unsigned int tcg_ctx_idx = UINT_MAX;
 
 TCGContext **tcg_ctxs;
 unsigned int tcg_cur_ctxs;
@@ -1256,11 +1257,15 @@ void tcg_register_thread(void)
 {
     tcg_ctx = &tcg_init_ctx;
 }
+
+void tcg_unregister_thread(void)
+{
+}
 #else
 void tcg_register_thread(void)
 {
     TCGContext *s = g_malloc(sizeof(*s));
-    unsigned int i, n;
+    unsigned int i, n, cur;
 
     *s = tcg_init_ctx;
 
@@ -1273,16 +1278,51 @@ void tcg_register_thread(void)
         }
     }
 
-    /* Claim an entry in tcg_ctxs */
+    /* Reuse a previously freed entry in tcg_ctxs when possible. */
+    cur = qatomic_read(&tcg_cur_ctxs);
+    for (i = 0; i < cur; i++) {
+        if (qatomic_cmpxchg(&tcg_ctxs[i], NULL, s) == NULL) {
+            n = i;
+            goto found_slot;
+        }
+    }
+
+    /* Claim a new entry in tcg_ctxs. */
     n = qatomic_fetch_inc(&tcg_cur_ctxs);
-    g_assert(n < tcg_max_ctxs);
+    if (unlikely(n >= tcg_max_ctxs)) {
+        qatomic_fetch_dec(&tcg_cur_ctxs);
+        g_assert_not_reached();
+    }
     qatomic_set(&tcg_ctxs[n], s);
+
+found_slot:
+    tcg_ctx_idx = n;
 
     if (n > 0) {
         tcg_region_initial_alloc(s);
     }
 
     tcg_ctx = s;
+}
+
+void tcg_unregister_thread(void)
+{
+    TCGContext *s;
+    unsigned int n;
+
+    if (tcg_ctx_idx == UINT_MAX) {
+        return;
+    }
+
+    n = tcg_ctx_idx;
+    s = tcg_ctx;
+
+    if (qatomic_cmpxchg(&tcg_ctxs[n], s, NULL) != s) {
+        g_assert_not_reached();
+    }
+
+    tcg_ctx = &tcg_init_ctx;
+    tcg_ctx_idx = UINT_MAX;
 }
 #endif /* !CONFIG_USER_ONLY */
 

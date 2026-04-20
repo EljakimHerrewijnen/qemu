@@ -415,6 +415,10 @@ void tcg_region_reset_all(void)
 
     for (i = 0; i < n_ctxs; i++) {
         TCGContext *s = qatomic_read(&tcg_ctxs[i]);
+
+        if (!s) {
+            continue;
+        }
         tcg_region_initial_alloc__locked(s);
     }
     qemu_mutex_unlock(&region.lock);
@@ -881,6 +885,10 @@ size_t tcg_code_size(void)
     for (i = 0; i < n_ctxs; i++) {
         const TCGContext *s = qatomic_read(&tcg_ctxs[i]);
         size_t size;
+
+        if (!s) {
+            continue;
+        }
 
         size = qatomic_read(&s->code_gen_ptr) - s->code_gen_buffer;
         g_assert(size <= s->code_gen_buffer_size);
