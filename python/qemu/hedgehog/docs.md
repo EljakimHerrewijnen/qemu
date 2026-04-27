@@ -149,7 +149,35 @@ The native run result matches the C enum:
 - `QEMU_HEDGEHOG_RUN_INVALID_MEMORY`
 
 `emu_start()` converts exception and invalid-memory results into
-`HedgehogError` exceptions.
+`HedgehogError` exceptions, but it intentionally does not expose
+backend-specific stop reasons such as `HALTED`.
+
+If you need to stop when the CPU enters an architectural wait state
+(for example Arm64 `WFI`, or `WFE` on profiles where it halts), use
+`qemu_run()` directly and inspect the run result:
+
+```python
+from qemu.hedgehog.constants import (
+    QEMU_HEDGEHOG_RUN_BUDGET_EXHAUSTED,
+    QEMU_HEDGEHOG_RUN_HALTED,
+)
+
+emu.qemu_set_pc(entry)
+
+while True:
+    run_result, cpu_exit = emu.qemu_run(100_000)
+
+    if run_result == QEMU_HEDGEHOG_RUN_HALTED:
+        pc = emu.qemu_get_pc()
+        print(f"guest halted/waiting at pc=0x{pc:x}, cpu_exit={cpu_exit}")
+        break
+
+    if run_result != QEMU_HEDGEHOG_RUN_BUDGET_EXHAUSTED:
+        raise RuntimeError(f"unexpected run result={run_result}, cpu_exit={cpu_exit}")
+```
+
+For Arm64 specifically, this pattern is useful when guest firmware idles with
+`WFI` while waiting for a device interrupt.
 
 ## Host-connected backends
 
@@ -262,6 +290,37 @@ That means:
 For example, a blocking UART receive routine may loop until input becomes
 available. If no input source is attached or injected, the guest will stay in
 that poll loop until your instruction budget expires.
+
+Another common pattern in embedded firmware is:
+
+1. Program a device and enable its interrupt.
+2. Execute `WFI`/`WFE` in an idle loop.
+3. Resume only when the device signals completion.
+
+In that case, the emulator can repeatedly return `QEMU_HEDGEHOG_RUN_HALTED`
+from `qemu_run()` until your host-side emulation injects the expected event.
+A practical control flow is:
+
+```python
+from qemu.hedgehog.constants import QEMU_HEDGEHOG_RUN_HALTED
+
+while True:
+    run_result, _cpu_exit = emu.qemu_run(50_000)
+
+    if run_result == QEMU_HEDGEHOG_RUN_HALTED:
+        if device_model.has_pending_rx_data():
+            device_model.inject_rx_byte(0x41)
+            continue
+
+        # No external event to deliver yet.
+        # Sleep/poll host I/O, then run again.
+        continue
+
+    # Handle other run results as needed.
+```
+
+This keeps control in Python while the guest waits in architectural idle
+states, and lets your device model decide when execution should wake up.
 
 ## Current limitations
 
