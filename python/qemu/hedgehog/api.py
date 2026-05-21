@@ -41,7 +41,9 @@ from .constants import (
     HEDGEHOG_HOOK_CODE,
     HEDGEHOG_HOOK_MEM_FETCH_UNMAPPED,
     HEDGEHOG_HOOK_MEM_INVALID,
+    HEDGEHOG_HOOK_MEM_READ,
     HEDGEHOG_HOOK_MEM_READ_UNMAPPED,
+    HEDGEHOG_HOOK_MEM_WRITE,
     HEDGEHOG_HOOK_MEM_WRITE_UNMAPPED,
     HEDGEHOG_MODE_16,
     HEDGEHOG_MODE_32,
@@ -64,8 +66,14 @@ _EXEC_HOOK_MASK = (
     HEDGEHOG_HOOK_CODE
 )
 
+_MEM_RW_MASK = (
+    HEDGEHOG_HOOK_MEM_READ |
+    HEDGEHOG_HOOK_MEM_WRITE
+)
+
 _SUPPORTED_HOOK_MASK = (
     _EXEC_HOOK_MASK |
+    _MEM_RW_MASK |
     _MEM_INVALID_MASK
 )
 
@@ -99,6 +107,14 @@ class _HookRegistration:
     user_data: object
     begin: int
     end: int
+
+
+@dataclass
+class _MappedRegion:
+    base: int
+    size: int
+    perms: int
+    kind: str
 
 
 class Hedgehog:
@@ -173,6 +189,7 @@ class Hedgehog:
         self._next_hook_handle = 1
         self._pending_exception: Optional[BaseException] = None
         self._last_invalid_access: Optional[int] = None
+        self._regions: Dict[Tuple[int, int, str], _MappedRegion] = {}
 
         self._coverage_modes = _normalize_coverage_modes(coverage)
         self._coverage_block_pcs: Set[int] = set()
@@ -220,6 +237,13 @@ class Hedgehog:
         if not self._backend.map_ram(name, address, size):
             raise HedgehogError(HEDGEHOG_ERR_MAP, 'unable to map RAM region')
 
+        self._regions[(int(address), int(size), 'ram')] = _MappedRegion(
+            base=int(address),
+            size=int(size),
+            perms=int(perms),
+            kind='ram',
+        )
+
     def mem_map_mmio(
         self,
         address: int,
@@ -245,6 +269,13 @@ class Hedgehog:
         ):
             raise HedgehogError(HEDGEHOG_ERR_MAP, 'unable to map MMIO region')
 
+        self._regions[(int(address), int(size), 'mmio')] = _MappedRegion(
+            base=int(address),
+            size=int(size),
+            perms=HEDGEHOG_PROT_ALL,
+            kind='mmio',
+        )
+
     def mem_read(self, address: int, size: int) -> bytes:
         """Read bytes from guest memory."""
         if address < 0 or size < 0:
@@ -253,6 +284,13 @@ class Hedgehog:
         result, data = self._backend.mem_read(address, size)
         if result != QEMU_MEMTX_OK:
             raise _memtx_error(result, is_write=False, is_fetch=False)
+
+        self._dispatch_mem_event(
+            HEDGEHOG_HOOK_MEM_READ,
+            int(address),
+            int(size),
+            _mem_hook_value(data),
+        )
         return data
 
     def mem_write(self, address: int, data: bytes) -> None:
@@ -264,6 +302,36 @@ class Hedgehog:
         result = self._backend.mem_write(address, payload)
         if result != QEMU_MEMTX_OK:
             raise _memtx_error(result, is_write=True, is_fetch=False)
+
+        self._dispatch_mem_event(
+            HEDGEHOG_HOOK_MEM_WRITE,
+            int(address),
+            len(payload),
+            _mem_hook_value(payload),
+        )
+
+    def mem_unmap(self, address: int, size: int) -> None:
+        """Unmap previously mapped guest memory ranges."""
+        if address < 0 or size <= 0:
+            raise HedgehogError(HEDGEHOG_ERR_ARG, 'address must be >= 0 and size must be > 0')
+
+        if not self._backend.unmap(int(address), int(size)):
+            raise HedgehogError(HEDGEHOG_ERR_MAP, 'unable to unmap memory range')
+
+        self._remove_regions(int(address), int(size))
+
+    def mem_regions(self) -> Tuple[Tuple[int, int, int], ...]:
+        """
+        Return mapped regions in Unicorn-style tuples.
+
+        Each entry is ``(begin, end_inclusive, perms)``.
+        """
+        regions = []
+        for region in self._regions.values():
+            begin = int(region.base)
+            end_inclusive = int(region.base + region.size - 1)
+            regions.append((begin, end_inclusive, int(region.perms)))
+        return tuple(sorted(regions, key=lambda entry: entry[0]))
 
     def reg_read(self, reg_id: int, size: int = 64) -> int:
         """
@@ -319,6 +387,8 @@ class Hedgehog:
         Supported hook families:
         - HEDGEHOG_HOOK_BLOCK
         - HEDGEHOG_HOOK_CODE
+        - HEDGEHOG_HOOK_MEM_READ
+        - HEDGEHOG_HOOK_MEM_WRITE
         - HEDGEHOG_HOOK_MEM_INVALID and unmapped memory subsets
         """
         del arg1
@@ -357,6 +427,84 @@ class Hedgehog:
 
         del self._hooks[int(handle)]
         self._sync_backend_hooks()
+
+    def hook_code(
+        self,
+        begin: int,
+        end: int,
+        callback: HookCallback,
+        user_data: object = None,
+    ) -> int:
+        """
+        Register an instruction hook over a guest address range.
+        """
+        return self.hook_add(
+            HEDGEHOG_HOOK_CODE,
+            callback,
+            user_data=user_data,
+            begin=int(begin),
+            end=int(end),
+        )
+
+    def hook_block(
+        self,
+        begin: int,
+        end: int,
+        callback: HookCallback,
+        user_data: object = None,
+    ) -> int:
+        """
+        Register a basic-block hook over a guest address range.
+        """
+        return self.hook_add(
+            HEDGEHOG_HOOK_BLOCK,
+            callback,
+            user_data=user_data,
+            begin=int(begin),
+            end=int(end),
+        )
+
+    def hook_mem_read(
+        self,
+        begin: int,
+        end: int,
+        callback: HookCallback,
+        user_data: object = None,
+    ) -> int:
+        """
+        Register a memory-read hook over a guest address range.
+
+        The callback follows Hedgehog/Unicorn-style memory hook arguments:
+        ``callback(emu, access, addr, size, value, user_data)``.
+        """
+        return self.hook_add(
+            HEDGEHOG_HOOK_MEM_READ,
+            callback,
+            user_data=user_data,
+            begin=int(begin),
+            end=int(end),
+        )
+
+    def hook_mem_write(
+        self,
+        begin: int,
+        end: int,
+        callback: HookCallback,
+        user_data: object = None,
+    ) -> int:
+        """
+        Register a memory-write hook over a guest address range.
+
+        The callback follows Hedgehog/Unicorn-style memory hook arguments:
+        ``callback(emu, access, addr, size, value, user_data)``.
+        """
+        return self.hook_add(
+            HEDGEHOG_HOOK_MEM_WRITE,
+            callback,
+            user_data=user_data,
+            begin=int(begin),
+            end=int(end),
+        )
 
     def emu_start(
         self,
@@ -572,6 +720,41 @@ class Hedgehog:
 
         return should_stop
 
+    def _dispatch_mem_event(self, hook_family: int, addr: int, size: int, value: int) -> None:
+        for reg in tuple(self._hooks.values()):
+            if not (reg.hook_type & hook_family):
+                continue
+            if not _address_in_range(addr, reg.begin, reg.end):
+                continue
+
+            try:
+                reg.callback(
+                    self,
+                    _hook_family_to_access_type(hook_family),
+                    addr,
+                    size,
+                    value,
+                    reg.user_data,
+                )
+            except BaseException as err:
+                raise HedgehogError(
+                    HEDGEHOG_ERR_EXCEPTION,
+                    'hook callback raised an exception',
+                ) from err
+
+    def _remove_regions(self, base: int, size: int) -> None:
+        end = base + size
+        to_delete = []
+
+        for key, region in self._regions.items():
+            region_start = int(region.base)
+            region_end = int(region.base + region.size)
+            if region_start >= base and region_end <= end:
+                to_delete.append(key)
+
+        for key in to_delete:
+            del self._regions[key]
+
     def _coverage_needs_tb(self) -> bool:
         return (
             _COVERAGE_MODE_BLOCK in self._coverage_modes or
@@ -665,6 +848,20 @@ def _access_type_to_hook(access_type: int) -> int:
     if access_type == QEMU_HEDGEHOG_MEM_ACCESS_FETCH:
         return HEDGEHOG_HOOK_MEM_FETCH_UNMAPPED
     return HEDGEHOG_HOOK_MEM_READ_UNMAPPED
+
+
+def _hook_family_to_access_type(hook_family: int) -> int:
+    if hook_family == HEDGEHOG_HOOK_MEM_WRITE:
+        return QEMU_HEDGEHOG_MEM_ACCESS_WRITE
+    if hook_family == HEDGEHOG_HOOK_MEM_FETCH_UNMAPPED:
+        return QEMU_HEDGEHOG_MEM_ACCESS_FETCH
+    return QEMU_HEDGEHOG_MEM_ACCESS_READ
+
+
+def _mem_hook_value(data: bytes) -> int:
+    if not data:
+        return 0
+    return int.from_bytes(data[:8], byteorder='little', signed=False)
 
 
 def _address_in_range(address: int, begin: int, end: int) -> bool:

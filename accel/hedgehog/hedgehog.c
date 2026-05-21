@@ -63,11 +63,36 @@ static NotifierWithReturn hedgehog_property_binding_notifier;
 
 typedef struct HedgehogRAMRegion {
     MemoryRegion mr;
+    hwaddr base;
+    uint64_t size;
 } HedgehogRAMRegion;
 
 typedef struct HedgehogMMIOMapping {
     HedgehogMMIODevice *dev;
+    hwaddr base;
+    uint64_t size;
 } HedgehogMMIOMapping;
+
+static bool hedgehog_ranges_overlap(hwaddr lhs_base, uint64_t lhs_size,
+                                   hwaddr rhs_base, uint64_t rhs_size)
+{
+    uint64_t lhs_start = lhs_base;
+    uint64_t rhs_start = rhs_base;
+    uint64_t lhs_end;
+    uint64_t rhs_end;
+
+    if (!lhs_size || !rhs_size) {
+        return false;
+    }
+
+    lhs_end = lhs_start + lhs_size;
+    rhs_end = rhs_start + rhs_size;
+    if (lhs_end < lhs_start || rhs_end < rhs_start) {
+        return true;
+    }
+
+    return lhs_start < rhs_end && rhs_start < lhs_end;
+}
 
 struct HedgehogBackend {
     CPUState *cpu;
@@ -1060,6 +1085,7 @@ bool hedgehog_backend_map_ram(HedgehogBackend *uc, const char *name,
                              hwaddr addr, uint64_t size, Error **errp)
 {
     HedgehogRAMRegion *region;
+    guint i;
 
     BQL_LOCK_GUARD();
 
@@ -1074,6 +1100,24 @@ bool hedgehog_backend_map_ram(HedgehogBackend *uc, const char *name,
         return false;
     }
 
+    for (i = 0; i < uc->ram_regions->len; i++) {
+        HedgehogRAMRegion *existing = g_ptr_array_index(uc->ram_regions, i);
+
+        if (hedgehog_ranges_overlap(existing->base, existing->size, addr, size)) {
+            error_setg(errp, "RAM mapping overlaps an existing region");
+            return false;
+        }
+    }
+
+    for (i = 0; i < uc->mmio_mappings->len; i++) {
+        HedgehogMMIOMapping *existing = g_ptr_array_index(uc->mmio_mappings, i);
+
+        if (hedgehog_ranges_overlap(existing->base, existing->size, addr, size)) {
+            error_setg(errp, "RAM mapping overlaps an existing MMIO mapping");
+            return false;
+        }
+    }
+
     region = g_new0(HedgehogRAMRegion, 1);
     if (!memory_region_init_ram_flags_nomigrate(&region->mr, NULL,
                                                 name ?: "hedgehog-ram",
@@ -1082,6 +1126,8 @@ bool hedgehog_backend_map_ram(HedgehogBackend *uc, const char *name,
         return false;
     }
 
+    region->base = addr;
+    region->size = size;
     memory_region_add_subregion(&uc->root, addr, &region->mr);
     g_ptr_array_add(uc->ram_regions, region);
     return true;
@@ -1095,6 +1141,7 @@ bool hedgehog_backend_map_mmio(HedgehogBackend *uc, const char *name,
 {
     HedgehogMMIOMapping *mapping;
     Object *obj;
+    guint i;
 
     BQL_LOCK_GUARD();
 
@@ -1109,6 +1156,24 @@ bool hedgehog_backend_map_mmio(HedgehogBackend *uc, const char *name,
         return false;
     }
 
+    for (i = 0; i < uc->ram_regions->len; i++) {
+        HedgehogRAMRegion *existing = g_ptr_array_index(uc->ram_regions, i);
+
+        if (hedgehog_ranges_overlap(existing->base, existing->size, addr, size)) {
+            error_setg(errp, "MMIO mapping overlaps an existing RAM region");
+            return false;
+        }
+    }
+
+    for (i = 0; i < uc->mmio_mappings->len; i++) {
+        HedgehogMMIOMapping *existing = g_ptr_array_index(uc->mmio_mappings, i);
+
+        if (hedgehog_ranges_overlap(existing->base, existing->size, addr, size)) {
+            error_setg(errp, "MMIO mapping overlaps an existing MMIO mapping");
+            return false;
+        }
+    }
+
     obj = object_new(TYPE_HEDGEHOG_MMIO_DEVICE);
     hedgehog_mmio_device_configure(HEDGEHOG_MMIO_DEVICE(obj),
                                   name ?: "hedgehog-mmio",
@@ -1121,9 +1186,97 @@ bool hedgehog_backend_map_mmio(HedgehogBackend *uc, const char *name,
 
     mapping = g_new0(HedgehogMMIOMapping, 1);
     mapping->dev = HEDGEHOG_MMIO_DEVICE(obj);
+    mapping->base = addr;
+    mapping->size = size;
     memory_region_add_subregion(&uc->root, addr,
                                 hedgehog_mmio_device_region(mapping->dev));
     g_ptr_array_add(uc->mmio_mappings, mapping);
+    return true;
+}
+
+bool hedgehog_backend_mem_unmap(HedgehogBackend *uc, hwaddr addr,
+                               uint64_t size, Error **errp)
+{
+    guint i;
+    uint64_t end;
+    bool removed = false;
+
+    BQL_LOCK_GUARD();
+
+    if (!uc || !size) {
+        error_setg(errp, "memory unmap requires a backend and non-zero size");
+        return false;
+    }
+
+    end = addr + size;
+    if (end < addr) {
+        error_setg(errp, "memory unmap range overflow");
+        return false;
+    }
+
+    for (i = uc->ram_regions->len; i > 0; i--) {
+        HedgehogRAMRegion *region = g_ptr_array_index(uc->ram_regions, i - 1);
+        uint64_t region_start = region->base;
+        uint64_t region_end = region_start + region->size;
+
+        if (region_end < region_start) {
+            error_setg(errp, "invalid RAM mapping range bookkeeping");
+            return false;
+        }
+
+        if (region_start >= addr && region_end <= end) {
+            if (uc->owns_memory_root) {
+                memory_region_del_subregion(&uc->root, &region->mr);
+            }
+            object_unparent(OBJECT(&region->mr));
+            g_ptr_array_remove_index(uc->ram_regions, i - 1);
+            g_free(region);
+            removed = true;
+            continue;
+        }
+
+        if (hedgehog_ranges_overlap(region_start, region->size, addr, size)) {
+            error_setg(errp, "partial RAM unmap is unsupported");
+            return false;
+        }
+    }
+
+    for (i = uc->mmio_mappings->len; i > 0; i--) {
+        HedgehogMMIOMapping *mapping = g_ptr_array_index(uc->mmio_mappings, i - 1);
+        uint64_t mapping_start = mapping->base;
+        uint64_t mapping_end = mapping_start + mapping->size;
+
+        if (mapping_end < mapping_start) {
+            error_setg(errp, "invalid MMIO mapping range bookkeeping");
+            return false;
+        }
+
+        if (mapping_start >= addr && mapping_end <= end) {
+            if (uc->owns_memory_root) {
+                memory_region_del_subregion(&uc->root,
+                                            hedgehog_mmio_device_region(mapping->dev));
+            }
+            if (DEVICE(mapping->dev)->realized) {
+                qdev_unrealize(DEVICE(mapping->dev));
+            }
+            object_unref(OBJECT(mapping->dev));
+            g_ptr_array_remove_index(uc->mmio_mappings, i - 1);
+            g_free(mapping);
+            removed = true;
+            continue;
+        }
+
+        if (hedgehog_ranges_overlap(mapping_start, mapping->size, addr, size)) {
+            error_setg(errp, "partial MMIO unmap is unsupported");
+            return false;
+        }
+    }
+
+    if (!removed) {
+        error_setg(errp, "unmap range does not match any mapping");
+        return false;
+    }
+
     return true;
 }
 

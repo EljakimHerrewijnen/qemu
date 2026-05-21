@@ -75,6 +75,8 @@ bool hedgehog_backend_map_mmio(HedgehogBackend *uc, const char *name,
                               HedgehogMMIOReadFunc read_fn,
                               HedgehogMMIOWriteFunc write_fn,
                               void *opaque, Error **errp);
+bool hedgehog_backend_mem_unmap(HedgehogBackend *uc, hwaddr addr,
+                               uint64_t size, Error **errp);
 
 MemTxResult hedgehog_backend_mem_read(HedgehogBackend *uc, hwaddr addr,
                                      void *buf, hwaddr len);

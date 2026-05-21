@@ -95,6 +95,10 @@ class BackendProtocol(Protocol):
         """Write guest memory, returning MemTxResult."""
         ...
 
+    def unmap(self, addr: int, size: int) -> bool:
+        """Unmap guest memory region, returning success."""
+        ...
+
     def reg_read(self, regno: int, buf_size: int) -> Optional[bytes]:
         """Read register bytes, or None on failure."""
         ...
@@ -365,6 +369,16 @@ class NativeBackend:
                 ctypes.c_uint64(addr),
                 ctypes.cast(buf, ctypes.c_void_p),
                 ctypes.c_uint64(len(data)),
+            )
+        )
+
+    def unmap(self, addr: int, size: int) -> bool:
+        return bool(
+            self._lib.hedgehog_backend_mem_unmap(
+                self._handle,
+                ctypes.c_uint64(addr),
+                ctypes.c_uint64(size),
+                None,
             )
         )
 
@@ -700,6 +714,14 @@ def _configure_library_api(lib: ctypes.CDLL) -> None:
         ctypes.c_uint64,
     ]
     lib.hedgehog_backend_mem_write.restype = ctypes.c_uint32
+
+    lib.hedgehog_backend_mem_unmap.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint64,
+        ctypes.c_uint64,
+        error_ptr_t,
+    ]
+    lib.hedgehog_backend_mem_unmap.restype = ctypes.c_bool
 
     lib.hedgehog_backend_reg_read.argtypes = [
         ctypes.c_void_p,
