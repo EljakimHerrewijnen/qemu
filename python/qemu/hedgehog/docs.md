@@ -458,7 +458,7 @@ while True:
 
 ## Lifecycle
 
-Create one `Hedgehog` instance per emulation session. Release it when done:
+Create one native `Hedgehog` instance per process. Release it when done:
 
 ```python
 emu.close()
@@ -472,24 +472,41 @@ with Hedgehog(HEDGEHOG_ARCH_X86, HEDGEHOG_MODE_64) as emu:
     emu.emu_start(0x1000, until=0, count=100)
 ```
 
-Creating multiple independent instances in one process to emulate different
-targets is supported. Each instance is completely independent.
+`close()` detaches Python callbacks, but it does not tear down QEMU's
+process-global TCG runtime. If you need multiple independent native emulator
+sessions, run each one in a separate subprocess.
 
 ## Current limitations
 
 - Only a subset of Hedgehog hooks is implemented (`BLOCK`, `CODE`,
   `MEM_READ`, `MEM_WRITE`, `MEM_INVALID` family).
-- Repeated create/close cycles in one process are not fully reliable yet.
+- Native backends can only be initialized once per process.
 - Host-connected device support covers chardev-backed connections and
   string-valued property binding. Block, net, and USB backend families are
   not exposed yet.
+
+### `HedgehogError(... only be initialized once per process ...)`
+
+The native backend is a process-local singleton because embedded QEMU TCG
+teardown is not currently safe for repeated create/close cycles. Use a fresh
+subprocess for each native emulator session.
 
 ## Troubleshooting
 
 ### `failed to create backend for cpu type ...`
 
-You likely loaded the wrong backend library for the CPU architecture. Use the
-`-aarch64` variant for AArch64 targets and the default for x86.
+This now includes backend-side detail when available, for example unknown or
+abstract CPU model errors returned by QEMU.
+
+Common cause: loading the wrong backend library for the requested CPU
+architecture. For ARM and AArch64 CPU models (for example `cortex-a9`), use
+the `libqemu-hedgehog-backend-aarch64.so` variant.
+
+If needed, pin the library explicitly:
+
+```bash
+QEMU_HEDGEHOG_BACKEND_LIBRARY=/path/to/libqemu-hedgehog-backend-aarch64.so
+```
 
 ### `HedgehogError(HEDGEHOG_ERR_*_UNMAPPED)`
 

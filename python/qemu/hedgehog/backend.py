@@ -17,6 +17,7 @@ import ctypes
 import ctypes.util
 import glob
 import os
+import threading
 from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, cast
 from typing import runtime_checkable
 
@@ -59,6 +60,20 @@ _MMIO_WRITE_BRIDGE = ctypes.CFUNCTYPE(
     ctypes.c_uint64,
     ctypes.c_uint64,
     ctypes.c_uint,
+)
+
+
+_NATIVE_BACKEND_PROCESS_LOCK = threading.Lock()
+_NATIVE_BACKEND_PROCESS_SINGLETON: Optional['NativeBackend'] = None
+
+_NATIVE_BACKEND_SINGLETON_ERROR = (
+    'qemu.hedgehog native backends can only be initialized once per process; '
+    'QEMU TCG teardown is not currently safe for repeated create/close cycles. '
+    'Run each native Hedgehog emulator in a separate process.'
+)
+
+_NATIVE_BACKEND_CLOSED_ERROR = (
+    'this qemu.hedgehog backend has been closed and cannot be reused'
 )
 
 
@@ -195,6 +210,8 @@ class NativeBackend:
         """
         Create and initialize a backend instance.
         """
+        global _NATIVE_BACKEND_PROCESS_SINGLETON
+
         if not cpu_type:
             raise HedgehogError(HEDGEHOG_ERR_ARG, 'cpu_type is required')
 
@@ -209,97 +226,158 @@ class NativeBackend:
                 'property_bindings require a board-backed machine_type',
             )
 
-        lib = _load_native_library(library_path)
-        _configure_library_api(lib)
-
-        for chardev_id, uri in (chardevs or {}).items():
-            ok = bool(
-                lib.hedgehog_backend_chardev_add(
-                    chardev_id.encode('ascii'),
-                    uri.encode('ascii'),
-                    None,
-                )
-            )
-            if not ok:
+        with _NATIVE_BACKEND_PROCESS_LOCK:
+            if _NATIVE_BACKEND_PROCESS_SINGLETON is not None:
                 raise HedgehogError(
                     HEDGEHOG_ERR_RESOURCE,
-                    f'failed to create chardev {chardev_id}',
+                    _NATIVE_BACKEND_SINGLETON_ERROR,
                 )
 
-        for object_path, bindings in (property_bindings or {}).items():
-            for property_name, value in bindings.items():
-                ok = bool(
-                    lib.hedgehog_backend_bind_property(
-                        object_path.encode('ascii'),
-                        property_name.encode('ascii'),
-                        value.encode('ascii'),
-                        None,
-                    )
+            lib = _load_native_library(library_path)
+            _configure_library_api(lib)
+
+            for chardev_id, uri in (chardevs or {}).items():
+                ok, detail = _call_bool_with_error(
+                    lib,
+                    lib.hedgehog_backend_chardev_add,
+                    chardev_id.encode('ascii'),
+                    uri.encode('ascii'),
                 )
                 if not ok:
                     raise HedgehogError(
                         HEDGEHOG_ERR_RESOURCE,
-                        f'failed to bind {object_path}:{property_name}={value}',
+                        _format_creation_error(
+                            f'failed to create chardev {chardev_id}',
+                            cpu_type,
+                            machine_type,
+                            detail,
+                        ),
                     )
 
-        for index, chardev_id in sorted((serial_backends or {}).items()):
-            ok = bool(
-                lib.hedgehog_backend_chardev_attach_serial(
+            for object_path, bindings in (property_bindings or {}).items():
+                for property_name, value in bindings.items():
+                    ok, detail = _call_bool_with_error(
+                        lib,
+                        lib.hedgehog_backend_bind_property,
+                        object_path.encode('ascii'),
+                        property_name.encode('ascii'),
+                        value.encode('ascii'),
+                    )
+                    if not ok:
+                        raise HedgehogError(
+                            HEDGEHOG_ERR_RESOURCE,
+                            _format_creation_error(
+                                f'failed to bind {object_path}:{property_name}={value}',
+                                cpu_type,
+                                machine_type,
+                                detail,
+                            ),
+                        )
+
+            for index, chardev_id in sorted((serial_backends or {}).items()):
+                ok, detail = _call_bool_with_error(
+                    lib,
+                    lib.hedgehog_backend_chardev_attach_serial,
                     ctypes.c_int(index),
                     chardev_id.encode('ascii'),
-                    None,
                 )
-            )
-            if not ok:
+                if not ok:
+                    raise HedgehogError(
+                        HEDGEHOG_ERR_RESOURCE,
+                        _format_creation_error(
+                            f'failed to attach chardev {chardev_id} to serial{index}',
+                            cpu_type,
+                            machine_type,
+                            detail,
+                        ),
+                    )
+
+            if machine_type and hasattr(lib, 'hedgehog_backend_initialize_for_machine'):
+                machine_arg = machine_type.encode('ascii')
+                initialized, detail = _call_bool_with_error(
+                    lib,
+                    lib.hedgehog_backend_initialize_for_machine,
+                    machine_arg,
+                )
+            else:
+                initialized, detail = _call_bool_with_error(
+                    lib,
+                    lib.hedgehog_backend_initialize,
+                )
+
+            if not initialized:
                 raise HedgehogError(
                     HEDGEHOG_ERR_RESOURCE,
-                    f'failed to attach chardev {chardev_id} to serial{index}',
+                    _format_creation_error(
+                        'failed to initialize qemu hedgehog backend',
+                        cpu_type,
+                        machine_type,
+                        detail,
+                    ),
                 )
 
-        if machine_type and hasattr(lib, 'hedgehog_backend_initialize_for_machine'):
-            machine_arg = machine_type.encode('ascii')
-            initialized = bool(
-                lib.hedgehog_backend_initialize_for_machine(machine_arg, None)
-            )
-        else:
-            initialized = bool(lib.hedgehog_backend_initialize(None))
+            if machine_type and not hasattr(lib, 'hedgehog_backend_new_with_machine'):
+                raise HedgehogError(
+                    HEDGEHOG_ERR_RESOURCE,
+                    'loaded backend library does not support machine_type selection',
+                )
 
-        if not initialized:
-            raise HedgehogError(
-                HEDGEHOG_ERR_RESOURCE,
-                'failed to initialize qemu hedgehog backend',
-            )
+            if hasattr(lib, 'hedgehog_backend_new_with_machine'):
+                machine_arg = machine_type.encode('ascii') if machine_type else None
+                backend, detail = _call_pointer_with_error(
+                    lib,
+                    lib.hedgehog_backend_new_with_machine,
+                    cpu_type.encode('ascii'),
+                    machine_arg,
+                )
+            else:
+                backend, detail = _call_pointer_with_error(
+                    lib,
+                    lib.hedgehog_backend_new,
+                    cpu_type.encode('ascii'),
+                )
+            if backend is None or int(backend) == 0:
+                raise HedgehogError(
+                    HEDGEHOG_ERR_RESOURCE,
+                    _format_creation_error(
+                        f'failed to create backend for cpu type {cpu_type}',
+                        cpu_type,
+                        machine_type,
+                        detail,
+                        library_name=_library_name(lib),
+                    ),
+                )
 
-        if machine_type and not hasattr(lib, 'hedgehog_backend_new_with_machine'):
-            raise HedgehogError(
-                HEDGEHOG_ERR_RESOURCE,
-                'loaded backend library does not support machine_type selection',
-            )
-
-        if hasattr(lib, 'hedgehog_backend_new_with_machine'):
-            machine_arg = machine_type.encode('ascii') if machine_type else None
-            backend = lib.hedgehog_backend_new_with_machine(
-                cpu_type.encode('ascii'),
-                machine_arg,
-                None,
-            )
-        else:
-            backend = lib.hedgehog_backend_new(cpu_type.encode('ascii'), None)
-        if backend is None or int(backend) == 0:
-            raise HedgehogError(
-                HEDGEHOG_ERR_RESOURCE,
-                f'failed to create backend for cpu type {cpu_type}',
-            )
-
-        return cls(lib, int(backend))
+            instance = cls(lib, int(backend))
+            _NATIVE_BACKEND_PROCESS_SINGLETON = instance
+            return instance
 
     def close(self) -> None:
         if self._closed:
             return
-        self._lib.hedgehog_backend_free(self._handle)
+
+        # The embedded QEMU/TCG runtime is process-global and does not currently
+        # provide a safe teardown path for repeated create/close cycles. Clear
+        # host-side callbacks so the Python objects can be collected, but keep
+        # the native backend alive until process exit.
+        self._clear_host_callbacks()
         self._closed = True
 
+    def _clear_host_callbacks(self) -> None:
+        self._lib.hedgehog_backend_set_tb_hook(self._handle, None, None)
+        self._lib.hedgehog_backend_set_insn_hook(self._handle, None, None)
+        self._lib.hedgehog_backend_set_invalid_mem_hook(self._handle, None, None)
+        self._tb_hook_bridge = None
+        self._insn_hook_bridge = None
+        self._invalid_hook_bridge = None
+        self._mmio_bridges.clear()
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise HedgehogError(HEDGEHOG_ERR_RESOURCE, _NATIVE_BACKEND_CLOSED_ERROR)
+
     def map_ram(self, name: str, addr: int, size: int) -> bool:
+        self._ensure_open()
         return bool(
             self._lib.hedgehog_backend_map_ram(
                 self._handle,
@@ -318,6 +396,8 @@ class NativeBackend:
         read_fn: MMIOReadCallback,
         write_fn: MMIOWriteCallback,
     ) -> bool:
+        self._ensure_open()
+
         def read_bridge(_opaque: int, io_addr: int, io_size: int) -> int:
             return int(read_fn(int(io_addr), int(io_size))) & 0xFFFFFFFFFFFFFFFF
 
@@ -350,6 +430,7 @@ class NativeBackend:
         return ok
 
     def mem_read(self, addr: int, size: int) -> Tuple[int, bytes]:
+        self._ensure_open()
         buf = ctypes.create_string_buffer(size)
         result = int(
             self._lib.hedgehog_backend_mem_read(
@@ -362,6 +443,7 @@ class NativeBackend:
         return result, bytes(buf.raw)
 
     def mem_write(self, addr: int, data: bytes) -> int:
+        self._ensure_open()
         buf = ctypes.create_string_buffer(data, len(data))
         return int(
             self._lib.hedgehog_backend_mem_write(
@@ -373,6 +455,7 @@ class NativeBackend:
         )
 
     def unmap(self, addr: int, size: int) -> bool:
+        self._ensure_open()
         return bool(
             self._lib.hedgehog_backend_mem_unmap(
                 self._handle,
@@ -383,6 +466,7 @@ class NativeBackend:
         )
 
     def reg_read(self, regno: int, buf_size: int) -> Optional[bytes]:
+        self._ensure_open()
         buf = ctypes.create_string_buffer(buf_size)
         nread = int(
             self._lib.hedgehog_backend_reg_read(
@@ -398,6 +482,7 @@ class NativeBackend:
         return bytes(buf.raw[:nread])
 
     def reg_write(self, regno: int, data: bytes) -> bool:
+        self._ensure_open()
         buf = ctypes.create_string_buffer(data, len(data))
         nwritten = int(
             self._lib.hedgehog_backend_reg_write(
@@ -411,6 +496,7 @@ class NativeBackend:
         return nwritten >= 0
 
     def set_tb_hook(self, callback: Optional[ExecHookCallback]) -> None:
+        self._ensure_open()
         self._tb_hook_bridge = _maybe_wrap_exec_hook(callback)
         self._lib.hedgehog_backend_set_tb_hook(
             self._handle,
@@ -419,6 +505,7 @@ class NativeBackend:
         )
 
     def set_insn_hook(self, callback: Optional[ExecHookCallback]) -> None:
+        self._ensure_open()
         self._insn_hook_bridge = _maybe_wrap_exec_hook(callback)
         self._lib.hedgehog_backend_set_insn_hook(
             self._handle,
@@ -430,6 +517,7 @@ class NativeBackend:
         self,
         callback: Optional[InvalidHookCallback],
     ) -> None:
+        self._ensure_open()
         self._invalid_hook_bridge = _maybe_wrap_invalid_hook(callback)
         self._lib.hedgehog_backend_set_invalid_mem_hook(
             self._handle,
@@ -438,15 +526,19 @@ class NativeBackend:
         )
 
     def reset(self) -> None:
+        self._ensure_open()
         self._lib.hedgehog_backend_reset(self._handle)
 
     def set_pc(self, addr: int) -> None:
+        self._ensure_open()
         self._lib.hedgehog_backend_set_pc(self._handle, ctypes.c_uint64(addr))
 
     def get_pc(self) -> int:
+        self._ensure_open()
         return int(self._lib.hedgehog_backend_get_pc(self._handle))
 
     def run(self, max_instructions: int) -> Tuple[int, int]:
+        self._ensure_open()
         cpu_exit = ctypes.c_int(0)
         run_result = int(
             self._lib.hedgehog_backend_run(
@@ -458,9 +550,11 @@ class NativeBackend:
         return run_result, int(cpu_exit.value)
 
     def stop(self) -> None:
+        self._ensure_open()
         self._lib.hedgehog_backend_stop(self._handle)
 
     def add_chardev(self, chardev_id: str, uri: str) -> bool:
+        self._ensure_open()
         return bool(
             self._lib.hedgehog_backend_chardev_add(
                 chardev_id.encode('ascii', 'replace'),
@@ -470,6 +564,7 @@ class NativeBackend:
         )
 
     def bind_property(self, object_path: str, property_name: str, value: str) -> bool:
+        self._ensure_open()
         return bool(
             self._lib.hedgehog_backend_bind_property(
                 object_path.encode('ascii', 'replace'),
@@ -480,6 +575,7 @@ class NativeBackend:
         )
 
     def attach_serial_chardev(self, index: int, chardev_id: str) -> bool:
+        self._ensure_open()
         return bool(
             self._lib.hedgehog_backend_chardev_attach_serial(
                 ctypes.c_int(index),
@@ -489,6 +585,7 @@ class NativeBackend:
         )
 
     def get_chardev_endpoint(self, chardev_id: str) -> Optional[str]:
+        self._ensure_open()
         required = int(
             self._lib.hedgehog_backend_chardev_get_endpoint(
                 chardev_id.encode('ascii', 'replace'),
@@ -514,6 +611,7 @@ class NativeBackend:
         return buf.value.decode('utf-8', errors='replace')
 
     def poll_events(self, block: bool) -> int:
+        self._ensure_open()
         return int(
             self._lib.hedgehog_backend_poll_events(
                 ctypes.c_bool(block),
@@ -777,6 +875,101 @@ def _configure_library_api(lib: ctypes.CDLL) -> None:
         ctypes.POINTER(ctypes.c_int),
     ]
     lib.hedgehog_backend_run.restype = ctypes.c_int
+
+    if hasattr(lib, 'error_get_pretty'):
+        lib.error_get_pretty.argtypes = [ctypes.c_void_p]
+        lib.error_get_pretty.restype = ctypes.c_char_p
+
+    if hasattr(lib, 'error_free'):
+        lib.error_free.argtypes = [ctypes.c_void_p]
+        lib.error_free.restype = None
+
+
+def _call_bool_with_error(
+    lib: ctypes.CDLL,
+    func: Any,
+    *args: Any,
+) -> Tuple[bool, Optional[str]]:
+    err = ctypes.c_void_p()
+    ok = bool(func(*args, ctypes.byref(err)))
+    return ok, _consume_error_detail(lib, err)
+
+
+def _call_pointer_with_error(
+    lib: ctypes.CDLL,
+    func: Any,
+    *args: Any,
+) -> Tuple[Optional[int], Optional[str]]:
+    err = ctypes.c_void_p()
+    result = func(*args, ctypes.byref(err))
+    detail = _consume_error_detail(lib, err)
+    if result is None:
+        return None, detail
+    value = int(result)
+    if value == 0:
+        return None, detail
+    return value, detail
+
+
+def _consume_error_detail(lib: ctypes.CDLL, err: ctypes.c_void_p) -> Optional[str]:
+    err_value = int(err.value or 0)
+    if err_value == 0:
+        return None
+
+    message: Optional[str] = None
+    if hasattr(lib, 'error_get_pretty'):
+        try:
+            pretty = lib.error_get_pretty(ctypes.c_void_p(err_value))
+            if pretty:
+                message = cast(bytes, pretty).decode('utf-8', errors='replace')
+        except Exception:
+            message = None
+
+    if hasattr(lib, 'error_free'):
+        try:
+            lib.error_free(ctypes.c_void_p(err_value))
+        except Exception:
+            pass
+
+    return message
+
+
+def _library_name(lib: ctypes.CDLL) -> Optional[str]:
+    name = getattr(lib, '_name', None)
+    if not name:
+        return None
+    return os.fspath(name)
+
+
+def _cpu_library_hint(cpu_type: str) -> Optional[str]:
+    cpu = cpu_type.lower()
+    arm_markers = ('arm', 'cortex-', 'cpsr', 'v7', 'v8')
+    if any(marker in cpu for marker in arm_markers):
+        return (
+            'for ARM/AArch64 CPU models, use the aarch64 backend library '
+            '(for example libqemu-hedgehog-backend-aarch64.so)'
+        )
+    return None
+
+
+def _format_creation_error(
+    summary: str,
+    cpu_type: str,
+    machine_type: Optional[str],
+    detail: Optional[str],
+    library_name: Optional[str] = None,
+) -> str:
+    pieces = [summary]
+    if machine_type:
+        pieces.append(f'machine_type={machine_type}')
+    if library_name:
+        pieces.append(f'library={library_name}')
+    if detail:
+        pieces.append(f'backend detail: {detail}')
+    hint = _cpu_library_hint(cpu_type)
+    if hint:
+        pieces.append(f'hint: {hint}')
+    return '; '.join(pieces)
 
     lib.hedgehog_backend_stop.argtypes = [ctypes.c_void_p]
     lib.hedgehog_backend_stop.restype = None

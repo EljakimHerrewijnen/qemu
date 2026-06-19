@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
+from types import SimpleNamespace
 from typing import Callable, Dict, List, Optional, Tuple, cast
 
 import pytest
 
 from qemu.hedgehog import Hedgehog, HedgehogError
-from qemu.hedgehog.backend import _maybe_wrap_invalid_hook
+from qemu.hedgehog.backend import NativeBackend, _maybe_wrap_invalid_hook
 from qemu.hedgehog.constants import (
     QEMU_MEMTX_DECODE_ERROR,
     QEMU_MEMTX_OK,
@@ -516,3 +517,77 @@ def test_qemu_chardev_helpers_delegate_to_backend() -> None:
     assert uc.qemu_events_poll(block=True) == 1
     assert backend.poll_calls == [False, True]
     uc.close()
+
+
+class _FakeNativeFunction:
+    def __init__(self, return_value: object = None):
+        self.return_value = return_value
+        self.calls: List[Tuple[object, ...]] = []
+        self.argtypes = None
+        self.restype = None
+
+    def __call__(self, *args: object) -> object:
+        self.calls.append(args)
+        return self.return_value
+
+
+def _make_fake_native_library() -> SimpleNamespace:
+    return SimpleNamespace(
+        hedgehog_backend_initialize=_FakeNativeFunction(True),
+        hedgehog_backend_new=_FakeNativeFunction(0x1234),
+        hedgehog_backend_chardev_add=_FakeNativeFunction(True),
+        hedgehog_backend_bind_property=_FakeNativeFunction(True),
+        hedgehog_backend_chardev_attach_serial=_FakeNativeFunction(True),
+        hedgehog_backend_set_tb_hook=_FakeNativeFunction(None),
+        hedgehog_backend_set_insn_hook=_FakeNativeFunction(None),
+        hedgehog_backend_set_invalid_mem_hook=_FakeNativeFunction(None),
+        hedgehog_backend_free=_FakeNativeFunction(None),
+        _name='fake-hedgehog-backend.so',
+    )
+
+
+def test_native_backend_rejects_second_process_local_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_lib = _make_fake_native_library()
+
+    monkeypatch.setattr('qemu.hedgehog.backend._NATIVE_BACKEND_PROCESS_SINGLETON', None)
+    monkeypatch.setattr('qemu.hedgehog.backend._load_native_library', lambda _path: fake_lib)
+    monkeypatch.setattr('qemu.hedgehog.backend._configure_library_api', lambda _lib: None)
+    monkeypatch.setattr(
+        'qemu.hedgehog.backend._call_bool_with_error',
+        lambda _lib, func, *args: (bool(func(*args)), None),
+    )
+    monkeypatch.setattr(
+        'qemu.hedgehog.backend._call_pointer_with_error',
+        lambda _lib, func, *args: (int(func(*args)), None),
+    )
+
+    backend = NativeBackend.create('qemu64-x86_64-cpu')
+
+    with pytest.raises(HedgehogError, match='only be initialized once per process'):
+        NativeBackend.create('qemu64-x86_64-cpu')
+
+    backend.close()
+
+
+def test_native_backend_close_detaches_callbacks_without_freeing() -> None:
+    fake_lib = _make_fake_native_library()
+    backend = NativeBackend(fake_lib, 0x1234)
+
+    backend.close()
+
+    assert fake_lib.hedgehog_backend_free.calls == []
+    assert len(fake_lib.hedgehog_backend_set_tb_hook.calls) == 1
+    assert len(fake_lib.hedgehog_backend_set_insn_hook.calls) == 1
+    assert len(fake_lib.hedgehog_backend_set_invalid_mem_hook.calls) == 1
+
+
+def test_native_backend_operations_fail_after_close() -> None:
+    fake_lib = _make_fake_native_library()
+    backend = NativeBackend(fake_lib, 0x1234)
+
+    backend.close()
+
+    with pytest.raises(HedgehogError, match='has been closed'):
+        backend.set_pc(0x1000)

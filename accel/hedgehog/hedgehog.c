@@ -1038,6 +1038,33 @@ void hedgehog_backend_free(HedgehogBackend *uc)
             memory_region_del_subregion(&uc->root,
                                         hedgehog_mmio_device_region(mapping->dev));
         }
+    }
+
+    for (i = 0; i < uc->ram_regions->len; i++) {
+        HedgehogRAMRegion *region = g_ptr_array_index(uc->ram_regions, i);
+
+        if (uc->owns_memory_root) {
+            memory_region_del_subregion(&uc->root, &region->mr);
+        }
+    }
+
+    if (uc->owns_address_space) {
+        address_space_destroy(&uc->as);
+        wait_for_rcu = true;
+    }
+
+    if (wait_for_rcu) {
+        /*
+         * address_space_destroy() and subregion removals defer FlatView cleanup
+         * to RCU callbacks. Keep all MemoryRegion-backed QOM objects alive
+         * until those callbacks complete.
+         */
+        synchronize_rcu();
+    }
+
+    for (i = 0; i < uc->mmio_mappings->len; i++) {
+        HedgehogMMIOMapping *mapping = g_ptr_array_index(uc->mmio_mappings, i);
+
         if (DEVICE(mapping->dev)->realized) {
             qdev_unrealize(DEVICE(mapping->dev));
         }
@@ -1048,25 +1075,12 @@ void hedgehog_backend_free(HedgehogBackend *uc)
     for (i = 0; i < uc->ram_regions->len; i++) {
         HedgehogRAMRegion *region = g_ptr_array_index(uc->ram_regions, i);
 
-        if (uc->owns_memory_root) {
-            memory_region_del_subregion(&uc->root, &region->mr);
-        }
         object_unparent(OBJECT(&region->mr));
         g_free(region);
     }
 
-    if (uc->owns_address_space) {
-        address_space_destroy(&uc->as);
-        wait_for_rcu = true;
-    }
     if (uc->owns_memory_root) {
         object_unparent(OBJECT(&uc->root));
-    }
-
-    if (wait_for_rcu) {
-        /* uc->as is embedded in uc, so delay freeing uc until the RCU
-         * callback scheduled by address_space_destroy() has completed. */
-        synchronize_rcu();
     }
 
     g_ptr_array_free(uc->mmio_mappings, true);
