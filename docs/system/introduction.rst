@@ -1,6 +1,15 @@
 Introduction
 ============
 
+.. note::
+   QEMU supports many different target CPU architectures and many
+   different machine types for each architecture. Options, properties,
+   and command lines that work for one architecture or machine type
+   will not necessarily work on another. The examples shown in this
+   manual are specific to the architecture and machine type being
+   demonstrated. When in doubt, consult the documentation for your
+   specific target architecture and machine type.
+
 .. _Accelerators:
 
 Virtualisation Accelerators
@@ -165,10 +174,8 @@ names so we can override the defaults later.
     -m 4096 \
 
 We then define the 4 vCPUs using the ``max`` option which gives us all
-the Arm features QEMU is capable of emulating. We enable a more
-emulation friendly implementation of Arm's pointer authentication
-algorithm. We explicitly specify TCG acceleration even though QEMU
-would default to it anyway.
+the Arm features QEMU is capable of emulating. We explicitly specify
+TCG acceleration even though QEMU would default to it anyway.
 
 .. code::
 

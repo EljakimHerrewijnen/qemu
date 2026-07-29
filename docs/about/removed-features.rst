@@ -699,7 +699,7 @@ was superseded by ``sections``.
 ``query-migrate`` return value member ``skipped`` (removed in 9.1)
 ''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 
-Member ``skipped`` of the ``MigrationStats`` struct hasn't been used
+Member ``skipped`` of the ``MigrationRAMStats`` struct hasn't been used
 for more than 10 years. Removed with no replacement.
 
 ``migrate`` command option ``inc`` (removed in 9.1)
@@ -782,8 +782,8 @@ without reporting any destination threads, or non-multifd source
 threads).  For debugging purpose, please use ``-name
 $VM,debug-threads=on`` instead.
 
-``migrate`` argument ``detach`` (since 11.0)
-''''''''''''''''''''''''''''''''''''''''''''
+``migrate`` argument ``detach`` (removed in 11.0)
+''''''''''''''''''''''''''''''''''''''''''''''''''
 
 This argument has always been ignored.
 
@@ -932,14 +932,20 @@ work around the atomicity issues in system mode by running all vCPUs
 in a single thread context; in user mode atomicity was simply broken.
 From 10.0, QEMU has disabled configuration of 64-bit guests on 32-bit hosts.
 
-32-bit MIPS (since 10.2)
-''''''''''''''''''''''''
+32-bit MIPS (removed in 10.2)
+'''''''''''''''''''''''''''''
 
 Debian 12 "Bookworm" removed support for 32-bit MIPS, making it hard to
 maintain our cross-compilation CI tests of the architecture.
 
-32-bit PPC (since 10.2)
-'''''''''''''''''''''''
+64-bit MIPS (removed in 11.1)
+'''''''''''''''''''''''''''''
+
+Debian 13 "Trixie" removed support for MIPS, making it hard to maintain our
+cross-compilation CI tests of the architecture.
+
+32-bit PPC (removed in 10.2)
+''''''''''''''''''''''''''''
 
 The QEMU project no longer supports 32-bit host builds.
 
@@ -1032,6 +1038,14 @@ initial RISC-V QEMU port. Its usage was always been unclear: users don't know
 what to expect from a CPU called 'any', and in fact the CPU does not do anything
 special that isn't already done by the default CPUs rv32/rv64.
 
+Power8E and Power8NVL CPUs (removed in 11.1)
+''''''''''''''''''''''''''''''''''''''''''''
+
+The Power8E and Power8NVL variants of Power8 are not really useful anymore
+in qemu, and are old and unmaintained.
+Hence, the CPUs as well as corresponding Power8NVL and Power8E PnvChips have
+been removed
+
 System accelerators
 -------------------
 
@@ -1112,7 +1126,7 @@ This machine was removed because it was unused. Alternative AST2500 based
 OpenPOWER machines are ``witherspoon-bmc`` and ``romulus-bmc``.
 
 ppc ``taihu`` machine (removed in 7.2)
-'''''''''''''''''''''''''''''''''''''''''''''
+''''''''''''''''''''''''''''''''''''''
 
 This machine was removed because it was partially emulated and 405
 machines are very similar. Use the ``ref405ep`` machine instead.
@@ -1172,8 +1186,8 @@ Mips ``mipssim`` machine (removed in 10.2)
 Linux dropped support for this virtual machine type in kernel v3.7, and
 there was also no binary available online to use with that board.
 
-Arm ``ast2700a0-evb`` machine (since 11.0)
-''''''''''''''''''''''''''''''''''''''''''
+Arm ``ast2700a0-evb`` machine (removed in 11.0)
+'''''''''''''''''''''''''''''''''''''''''''''''
 
 The ``ast2700a0-evb`` machine represents the first revision of the AST2700
 and serves as the initial engineering sample rather than a production version.
@@ -1186,6 +1200,56 @@ Arm ``highbank`` and ``midway`` machines (removed in 11.0)
 There were no known users left for these machines. If you just want to
 boot a Cortex-A15 or Cortex-A9 Linux, use the ``virt`` machine instead.
 
+Arm ``sonorapass-bmc`` machine (removed in 11.1)
+''''''''''''''''''''''''''''''''''''''''''''''''
+
+The ``sonorapass-bmc`` machine represents a lab server that never
+entered production. It can be replaced by the ``ast2500-evb`` machine
+using the ``fmc-model`` option to specify the flash type. The I2C
+devices connected to the board can be defined via the QEMU command
+line.
+
+Arm ``qcom-dc-scm-v1-bmc`` and ``qcom-firework-bmc`` machine (removed in 11.1)
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+The ``qcom-dc-scm-v1-bmc`` and ``qcom-firework-bmc`` represent lab
+servers that never entered production. Since they do not rely on any
+specific device models, they can be replaced by the ``ast2600-evb``
+machine using the ``fmc-model`` option to specify the flash type. The
+I2C devices connected to the board can be defined via the QEMU command
+line.
+
+Arm ``fp5280g2-bmc`` machine (removed in 11.1)
+''''''''''''''''''''''''''''''''''''''''''''''
+
+The ``fp5280g2-bmc`` machine does not rely on any specific device
+models, it can be replaced by the ``ast2500-evb`` machine using the
+``fmc-model`` option to specify the flash type. The I2C devices
+connected to the board can be defined via the QEMU command line.
+
+Arm ``fby35`` machine (removed in 11.1)
+'''''''''''''''''''''''''''''''''''''''
+
+The ``fby35`` machine was originally added as an example of a
+multi-SoC system, with the expectation the models would evolve over
+time in an heterogeneous system. This hasn't happened and no public
+firmware is available to boot it. It can be replaced by the
+``ast2700fc``, another multi-SoC machine based on the newer AST2700
+SoCs which are excepted to receive better support in the future.
+
+RISC-V default machine (removed in 11.1)
+''''''''''''''''''''''''''''''''''''''''
+
+RISC-V used to define ``spike`` as the default machine if no machine option
+was given via the command line.  This happened because ``spike`` was the first
+RISC-V machine implemented in QEMU and setting it as default was
+convenient at that time.  Now we have 7 riscv64 and 6 riscv32 machines
+and having ``spike`` as a default is no longer justified.
+
+The default machine option has been removed, forcing users to always set the
+machine they want to use to avoid confusion.  Existing users of the ``spike``
+machine must ensure that they're setting the ``spike`` machine in the
+command line (``-M spike``).
 
 linux-user mode CPUs
 --------------------
@@ -1290,8 +1354,8 @@ by using ``-machine graphics=off``.
 
 The 'pvrdma' device and the whole RDMA subsystem have been removed.
 
-``-device sd-card,spec_version=1`` (since 10.2)
-'''''''''''''''''''''''''''''''''''''''''''''''
+``-device sd-card,spec_version=1`` (removed in 10.2)
+''''''''''''''''''''''''''''''''''''''''''''''''''''
 
 SD physical layer specification v2.00 supersedes the v1.10 one.
 
@@ -1393,24 +1457,31 @@ The corresponding upstream server project is no longer maintained.
 Users are recommended to switch to an alternative distributed block
 device driver such as RBD.
 
+``gluster`` backend (removed in 11.1)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+According to https://marc.info/?l=fedora-devel-list&m=171934833215726
+the GlusterFS development effectively ended.
+
+
 VFIO devices
 ------------
 
-``-device vfio-calxeda-xgmac`` (since 10.2)
-'''''''''''''''''''''''''''''''''''''''''''
+``-device vfio-calxeda-xgmac`` (removed in 10.2)
+''''''''''''''''''''''''''''''''''''''''''''''''
 The vfio-calxeda-xgmac device allows to assign a host Calxeda Highbank
 10Gb XGMAC Ethernet controller device ("calxeda,hb-xgmac" compatibility
 string) to a guest. Calxeda HW has been ewasted now and there is no point
 keeping that device.
 
-``-device vfio-amd-xgbe`` (since 10.2)
-''''''''''''''''''''''''''''''''''''''
+``-device vfio-amd-xgbe`` (removed in 10.2)
+'''''''''''''''''''''''''''''''''''''''''''
 The vfio-amd-xgbe device allows to assign a host AMD 10GbE controller
 to a guest ("amd,xgbe-seattle-v1a" compatibility string). AMD "Seattle"
 is not supported anymore and there is no point keeping that device.
 
-``-device vfio-platform`` (since 10.2)
-''''''''''''''''''''''''''''''''''''''
+``-device vfio-platform`` (removed in 10.2)
+'''''''''''''''''''''''''''''''''''''''''''
 The vfio-platform device allows to assign a host platform device
 to a guest in a generic manner. Integrating a new device into
 the vfio-platform infrastructure requires some adaptation at

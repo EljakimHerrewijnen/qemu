@@ -5,6 +5,7 @@
  */
 #include "qemu/osdep.h"
 #include "qemu/crc32c.h"
+#include "qemu/error-report.h"
 #include "system/dma.h"
 #include "migration/vmstate.h"
 
@@ -28,9 +29,20 @@ static int uefi_vars_post_load(void *opaque, int version_id)
 {
     uefi_vars_state *uv = opaque;
 
-    uefi_vars_update_storage(uv);
-    uefi_vars_json_save(uv);
+    if (uv->buf_size > MAX_BUFFER_SIZE) {
+        error_report("invalid buffer size");
+        return -1;
+    }
     uv->buffer = g_malloc(uv->buf_size);
+
+    uefi_vars_update_storage(uv);
+    if (uv->used_storage > uv->max_storage) {
+        error_report("out of variable memory (%" PRId64 " > %" PRId64 ")",
+                     uv->used_storage, uv->max_storage);
+        return -1;
+    }
+
+    uefi_vars_json_save(uv);
     return 0;
 }
 
@@ -137,9 +149,8 @@ static uint32_t uefi_vars_cmd_mm(uefi_vars_state *uv, bool dma_mode)
                          uv->buffer, sizeof(*mhdr) + mhdr->length,
                          MEMTXATTRS_UNSPECIFIED);
     } else {
-        memcpy(uv->pio_xfer_buffer + sizeof(*mhdr),
-               uv->buffer + sizeof(*mhdr),
-               sizeof(*mhdr) + mhdr->length);
+        memcpy(uv->pio_xfer_buffer,
+               uv->buffer, sizeof(*mhdr) + mhdr->length);
     }
 
     return retval;
@@ -236,6 +247,10 @@ static uint64_t uefi_vars_read(void *opaque, hwaddr addr, unsigned size)
         uv->pio_xfer_offset += size;
         break;
     case UEFI_VARS_REG_PIO_BUFFER_CRC32C:
+        if (uv->pio_xfer_offset > uv->buf_size) {
+            retval = 0;
+            break;
+        }
         retval = crc32c(0xffffffff, uv->pio_xfer_buffer, uv->pio_xfer_offset);
         break;
     case UEFI_VARS_REG_FLAGS:
