@@ -12,6 +12,7 @@
 #include "qemu/module.h"
 #include "qemu/rcu.h"
 #include "qemu/target-info.h"
+#include "qemu/target-info-qom.h"
 #include "qemu/units.h"
 #include "qom/object.h"
 #include "qapi/error.h"
@@ -19,6 +20,7 @@
 #include "hw/core/boards.h"
 #include "hw/core/qdev.h"
 #include "hw/core/cpu.h"
+#include "accel/tcg/cpu-loop.h"
 #include "exec/cpu-common.h"
 #include "system/cpus.h"
 #include "system/hedgehog-exec-hooks.h"
@@ -29,6 +31,7 @@
 #include "system/hedgehog-backend.h"
 #include "tcg/startup.h"
 #include "accel/tcg/internal-common.h"
+#include "system/memory-internal.h"
 #include "hedgehog-mmio-device.h"
 
 typedef struct HedgehogInitState {
@@ -328,6 +331,8 @@ static bool hedgehog_backend_ensure_runtime_initialized(Error **errp)
         return true;
     }
 
+    module_call_init(MODULE_INIT_TARGET_INFO);
+    target_info_qom_set_target();
     qemu_init_subsystems();
     if (!hedgehog_init_state.opts_initialized) {
         qemu_add_opts(&qemu_chardev_opts);
@@ -645,7 +650,7 @@ bool hedgehog_backend_initialize_for_machine(const char *machine_type,
         return false;
     }
 
-    cpu_exec_init_all();
+    machine_memory_init();
     hedgehog_backend_init_tcg_accel();
     hedgehog_backend_advance_machine_phases();
 
@@ -1316,7 +1321,7 @@ int hedgehog_backend_reg_read(HedgehogBackend *uc, int regno,
                              uint8_t *buf, size_t buf_size,
                              Error **errp)
 {
-    CPUClass *cc;
+    const CPUClass *cc;
     g_autoptr(GByteArray) reg = NULL;
     int reg_len;
 
@@ -1355,7 +1360,7 @@ int hedgehog_backend_reg_write(HedgehogBackend *uc, int regno,
                               const uint8_t *buf, size_t buf_size,
                               Error **errp)
 {
-    CPUClass *cc;
+    const CPUClass *cc;
     g_autofree uint8_t *tmp = NULL;
     int reg_len;
 
@@ -1515,4 +1520,3 @@ AddressSpace *hedgehog_backend_address_space(HedgehogBackend *uc)
 {
     return uc ? uc->active_as : NULL;
 }
-

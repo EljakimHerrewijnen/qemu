@@ -73,14 +73,15 @@ class build_py_with_hedgehog_backend(build_py.build_py):
         return outputs + list(getattr(self, '_hedgehog_outputs', []))
 
     def _candidate_paths(self):
-        seen = set()
+        seen_names = set()
 
         explicit = os.getenv('QEMU_HEDGEHOG_BACKEND_LIBRARY')
         if explicit:
             path = Path(explicit).expanduser()
             if path.is_file():
-                seen.add(path.resolve())
-                yield path.resolve()
+                path = path.resolve()
+                seen_names.add(path.name)
+                yield path
 
         build_dir_env = os.getenv('QEMU_HEDGEHOG_BACKEND_BUILD_DIR')
         source_root = Path(__file__).resolve().parent.parent
@@ -97,9 +98,9 @@ class build_py_with_hedgehog_backend(build_py.build_py):
                     path = Path(match).resolve()
                     if not path.is_file():
                         continue
-                    if path in seen:
+                    if path.name in seen_names:
                         continue
-                    seen.add(path)
+                    seen_names.add(path.name)
                     yield path
 
     def _copy_hedgehog_binaries(self):

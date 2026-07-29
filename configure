@@ -755,6 +755,13 @@ for opt do
   esac
 done
 
+# The Hedgehog backend links QEMU's static object graph into shared
+# libraries, so every contributing static library must be built as PIC.
+if has_meson_option "-Dhedgehog=enabled" &&
+   ! has_meson_option "-Db_staticpic"; then
+    meson_option_add -Db_staticpic=true
+fi
+
 if ! test -e "$source_path/.git"
 then
     git_submodules_action="validate"

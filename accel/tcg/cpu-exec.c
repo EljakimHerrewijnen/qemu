@@ -899,7 +899,7 @@ static inline void cpu_loop_exec_tb(CPUState *cpu, TranslationBlock *tb,
      * In single-step mode each TB is one guest instruction, which lets
      * hedgehog backends expose instruction callbacks without translator edits.
      */
-    if (cpu->singlestep_enabled && hedgehog_exec_hook_insn(cpu, pc)) {
+    if (cpu_single_stepping(cpu) && hedgehog_exec_hook_insn(cpu, pc)) {
         *last_tb = NULL;
         *tb_exit = TB_EXIT_REQUESTED;
         return;
