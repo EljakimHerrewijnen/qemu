@@ -19,13 +19,7 @@ jobs:
         include:
           - host_arch: x86_64
             runner: ubuntu-24.04
-            python_version: '3.11'
-          - host_arch: x86_64
-            runner: ubuntu-24.04
             python_version: '3.12'
-          - host_arch: aarch64
-            runner: ubuntu-24.04-arm
-            python_version: '3.11'
           - host_arch: aarch64
             runner: ubuntu-24.04-arm
             python_version: '3.12'
@@ -122,13 +116,7 @@ jobs:
         include:
           - host_arch: x86_64
             runner: ubuntu-24.04
-            python_version: '3.11'
-          - host_arch: x86_64
-            runner: ubuntu-24.04
             python_version: '3.12'
-          - host_arch: aarch64
-            runner: ubuntu-24.04-arm
-            python_version: '3.11'
           - host_arch: aarch64
             runner: ubuntu-24.04-arm
             python_version: '3.12'
@@ -211,13 +199,11 @@ jobs:
           import glob
 
           wheels = sorted(glob.glob('dist/*.whl'))
-          if len(wheels) < 4:
-              raise SystemExit(f'Expected at least 4 wheels, got: {wheels}')
+          if len(wheels) < 2:
+              raise SystemExit(f'Expected at least 2 wheels, got: {wheels}')
 
           required = (
-              ('x86_64', 'cp311'),
               ('x86_64', 'cp312'),
-              ('aarch64', 'cp311'),
               ('aarch64', 'cp312'),
           )
           missing = [
