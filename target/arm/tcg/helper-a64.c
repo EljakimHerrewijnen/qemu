@@ -38,6 +38,7 @@
 #include "exec/tlb-flags.h"
 #include "qemu/int128.h"
 #include "qemu/atomic128.h"
+#include "system/hedgehog-exec-hooks.h"
 #include "fpu/softfloat.h"
 #include <zlib.h> /* for crc32 */
 #ifdef CONFIG_USER_ONLY
@@ -761,6 +762,8 @@ void HELPER(exception_return)(CPUARMState *env, uint64_t new_pc)
     bql_lock();
     arm_call_el_change_hook(cpu);
     bql_unlock();
+    hedgehog_exec_hook_system_call_complete(CPU(cpu), new_pc, cur_el, new_el,
+                                            env->xregs);
 
     return;
 

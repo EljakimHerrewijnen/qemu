@@ -49,6 +49,9 @@
 #include "hw/core/boards.h"
 #include "hw/core/hw-error.h"
 #include "trace.h"
+#ifdef CONFIG_TCG
+#include "system/hedgehog-exec-hooks.h"
+#endif
 
 #ifdef CONFIG_LINUX
 
@@ -101,6 +104,15 @@ bool cpu_thread_is_idle(CPUState *cpu)
         return cpus_accel->cpu_thread_is_idle(cpu);
     }
     return true;
+}
+
+static bool cpu_direct_run_active(CPUState *cpu)
+{
+#ifdef CONFIG_TCG
+    return hedgehog_exec_hook_direct_run_active(cpu);
+#else
+    return false;
+#endif
 }
 
 bool all_cpu_threads_idle(void)
@@ -466,7 +478,13 @@ void qemu_process_cpu_events(CPUState *cpu)
     bool slept = false;
 
     qatomic_set(&cpu->exit_request, false);
-    while (cpu_thread_is_idle(cpu)) {
+    /*
+     * A standalone embedding may drive cpu_exec() from its caller thread.
+     * Keep QEMU's normal vCPU scheduler parked while that direct run owns the
+     * CPU, including when queued safe work makes cpu_thread_is_idle() false.
+     * The direct runner drains that work after cpu_exec_end().
+     */
+    while (cpu_thread_is_idle(cpu) || cpu_direct_run_active(cpu)) {
         if (!slept) {
             slept = true;
             qemu_plugin_vcpu_idle_cb(cpu);
@@ -928,4 +946,3 @@ void qmp_inject_nmi(Error **errp)
 {
     nmi_monitor_handle(monitor_get_cpu_index(monitor_cur()), errp);
 }
-

@@ -36,6 +36,13 @@ int64_t cpu_get_ticks(void);
  */
 int64_t cpu_get_clock(void);
 
+/*
+ * Restore the standalone CPU virtual clock while execution is stopped.
+ * Hedgehog uses this only when restoring its own native CPU snapshot; callers
+ * hold BQL, so the clock offset and active-tick state are updated atomically.
+ */
+void cpu_set_clock(int64_t new_time);
+
 void qemu_timer_notify_cb(void *opaque, QEMUClockType type);
 
 /* get/set VIRTUAL clock and VM elapsed ticks via the cpus accel interface */

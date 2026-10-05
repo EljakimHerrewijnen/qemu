@@ -29,6 +29,7 @@
 #include "qemu/log.h"
 #include "semihosting/semihost.h"
 #include "cpregs.h"
+#include "system/hedgehog-backend.h"
 
 static TCGv_i64 cpu_X[32];
 static TCGv_i64 cpu_gcspr[4];
@@ -3287,6 +3288,11 @@ static bool trans_SVC(DisasContext *s, arg_i *a)
      * instruction works properly.
      */
     uint32_t syndrome = syn_aa64_svc(a->imm);
+
+    gen_a64_update_pc(s, 0);
+    gen_helper_hedgehog_system_call(
+        tcg_env, tcg_constant_i32(HEDGEHOG_SYSTEM_CALL_SVC),
+        tcg_constant_i32(syndrome));
     if (s->fgt_svc) {
         gen_exception_insn_el(s, 0, EXCP_UDEF, syndrome, 2);
         return true;
@@ -3300,6 +3306,10 @@ static bool trans_HVC(DisasContext *s, arg_i *a)
 {
     int target_el = s->current_el == 3 ? 3 : 2;
 
+    gen_a64_update_pc(s, 0);
+    gen_helper_hedgehog_system_call(
+        tcg_env, tcg_constant_i32(HEDGEHOG_SYSTEM_CALL_HVC),
+        tcg_constant_i32(syn_aa64_hvc(a->imm)));
     if (s->current_el == 0) {
         unallocated_encoding(s);
         return true;
@@ -3308,7 +3318,6 @@ static bool trans_HVC(DisasContext *s, arg_i *a)
      * The pre HVC helper handles cases when HVC gets trapped
      * as an undefined insn by runtime configuration.
      */
-    gen_a64_update_pc(s, 0);
     gen_helper_pre_hvc(tcg_env);
     /* Architecture requires ss advance before we do the actual work */
     gen_ss_advance(s);
@@ -3318,11 +3327,14 @@ static bool trans_HVC(DisasContext *s, arg_i *a)
 
 static bool trans_SMC(DisasContext *s, arg_i *a)
 {
+    gen_a64_update_pc(s, 0);
+    gen_helper_hedgehog_system_call(
+        tcg_env, tcg_constant_i32(HEDGEHOG_SYSTEM_CALL_SMC),
+        tcg_constant_i32(syn_aa64_smc(a->imm)));
     if (s->current_el == 0) {
         unallocated_encoding(s);
         return true;
     }
-    gen_a64_update_pc(s, 0);
     gen_helper_pre_smc(tcg_env, tcg_constant_i32(syn_aa64_smc(a->imm)));
     /* Architecture requires ss advance before we do the actual work */
     gen_ss_advance(s);

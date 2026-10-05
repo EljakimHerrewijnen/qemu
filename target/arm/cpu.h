@@ -1218,6 +1218,9 @@ void arm_gt_sel2vtimer_cb(void *opaque);
 
 unsigned int gt_cntfrq_period_ns(ARMCPU *cpu);
 void gt_rme_post_el_change(ARMCPU *cpu, void *opaque);
+/* Restore one generic-timer view before guest execution resumes. */
+void gt_restore_timer(CPUARMState *env, int timeridx, uint64_t cval,
+                      uint32_t ctl);
 
 #define ARM_AFF0_SHIFT 0
 #define ARM_AFF0_MASK  (0xFFULL << ARM_AFF0_SHIFT)

@@ -100,6 +100,19 @@ int64_t cpu_get_clock(void)
     return ti;
 }
 
+void cpu_set_clock(int64_t new_time)
+{
+    /* BQL serializes vm-clock state for all standalone direct runners. */
+    seqlock_write_lock(&timers_state.vm_clock_seqlock,
+                       &timers_state.vm_clock_lock);
+    timers_state.cpu_clock_offset = new_time;
+    if (timers_state.cpu_ticks_enabled) {
+        timers_state.cpu_clock_offset -= get_clock();
+    }
+    seqlock_write_unlock(&timers_state.vm_clock_seqlock,
+                         &timers_state.vm_clock_lock);
+}
+
 /*
  * enable cpu_get_ticks()
  * Caller must hold BQL which serves as mutex for vm_clock_seqlock.

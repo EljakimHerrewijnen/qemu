@@ -11,8 +11,8 @@ in-tree QEMU Hedgehog backend implementation.
 # the COPYING file in the top-level directory.
 
 from . import constants
-from .api import Hedgehog
-from .backend import BackendProtocol, NativeBackend
+from .api import Hedgehog, InvalidInstruction
+from .backend import CPUWaitEvent, BackendProtocol, InvalidMemoryDiagnostic, NativeBackend
 from .errors import HedgehogError, hedgehog_strerror
 
 
@@ -22,6 +22,9 @@ for _name in constants.__all__:
 
 __all__ = (
     'Hedgehog',
+    'InvalidInstruction',
+    'CPUWaitEvent',
+    'InvalidMemoryDiagnostic',
     'HedgehogError',
     'hedgehog_strerror',
     'BackendProtocol',

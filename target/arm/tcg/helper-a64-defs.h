@@ -157,5 +157,6 @@ DEF_HELPER_FLAGS_5(gvec_fscale_s, TCG_CALL_NO_RWG, void, ptr, ptr, ptr, fpst, i3
 DEF_HELPER_FLAGS_5(gvec_fscale_d, TCG_CALL_NO_RWG, void, ptr, ptr, ptr, fpst, i32)
 
 #ifndef CONFIG_USER_ONLY
+DEF_HELPER_3(hedgehog_system_call, void, env, i32, i32)
 DEF_HELPER_2(exception_return, void, env, i64)
 #endif

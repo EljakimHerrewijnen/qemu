@@ -21,3 +21,15 @@ GTAGS
 *.swp
 *.patch
 *.gcov
+
+# Local development tooling and plans
+/llm_tools/
+
+# Private Hedgehog investigation material. Keep target profiles, firmware,
+# dumps, traces, and analysis notes under this directory only.
+/.hedgehog-local/
+
+# Local environment files may contain credentials or private paths.
+/.env
+/.env.*
+!/.env.example

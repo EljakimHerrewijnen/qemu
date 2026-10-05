@@ -727,6 +727,18 @@ static inline bool cpu_handle_exception(CPUState *cpu, int *ret)
 #else
     if (replay_exception()) {
         const TCGCPUOps *tcg_ops = cpu->cc->tcg_ops;
+        vaddr next_pc = 0;
+        HedgehogInvalidInsnDisposition disposition;
+
+        disposition = hedgehog_exec_hook_invalid_insn(cpu, &next_pc);
+        if (disposition != HEDGEHOG_INVALID_INSN_PASS) {
+            if (disposition == HEDGEHOG_INVALID_INSN_CONTINUE) {
+                cpu_set_pc(cpu, next_pc);
+            }
+            cpu->exception_index = -1;
+            *ret = EXCP_INTERRUPT;
+            return true;
+        }
 
         bql_lock();
         tcg_ops->do_interrupt(cpu);

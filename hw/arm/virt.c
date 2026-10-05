@@ -150,6 +150,8 @@ static void arm_virt_compat_default_set(MachineClass *mc)
 
 /* Number of external interrupt lines to configure the GIC with */
 #define NUM_IRQS 256
+#define MAX_GIC_SPIS \
+    QEMU_ALIGN_DOWN(GICV3_MAXIRQ - GIC_INTERNAL, GIC_INTERNAL)
 
 #define PLATFORM_BUS_NUM_IRQS 64
 
@@ -1226,7 +1228,7 @@ static void create_gicv5(VirtMachineState *vms, MemoryRegion *mem)
     QList *cpulist = qlist_new(), *iaffidlist = qlist_new();
 
     vms->gic = qdev_new(gictype);
-    qdev_prop_set_uint32(vms->gic, "spi-range", NUM_IRQS);
+    qdev_prop_set_uint32(vms->gic, "spi-range", vms->gic_num_spis);
 
     object_property_set_link(OBJECT(vms->gic), "sysmem", OBJECT(mem),
                              &error_fatal);
@@ -1291,7 +1293,7 @@ static void gic_connect_ppis(VirtMachineState *vms)
 
     for (int i = 0; i < smp_cpus; i++) {
         DeviceState *cpudev = DEVICE(qemu_get_cpu(i));
-        int intidbase = NUM_IRQS + i * GIC_INTERNAL;
+        int intidbase = vms->gic_num_spis + i * GIC_INTERNAL;
         /*
          * Mapping from the output timer irq lines from the CPU to the
          * GIC PPI inputs we use for the virt board.
@@ -1363,7 +1365,8 @@ static void create_gicv2(VirtMachineState *vms, MemoryRegion *mem)
      * Note that the num-irq property counts both internal and external
      * interrupts; there are always 32 of the former (mandated by GIC spec).
      */
-    qdev_prop_set_uint32(vms->gic, "num-irq", NUM_IRQS + 32);
+    qdev_prop_set_uint32(vms->gic, "num-irq",
+                         vms->gic_num_spis + GIC_INTERNAL);
     if (!kvm_irqchip_in_kernel()) {
         qdev_prop_set_bit(vms->gic, "has-security-extensions", vms->secure);
         qdev_prop_set_bit(vms->gic, "has-virtualization-extensions", vms->virt);
@@ -1419,7 +1422,8 @@ static void create_gicv3(VirtMachineState *vms, MemoryRegion *mem)
      * Note that the num-irq property counts both internal and external
      * interrupts; there are always 32 of the former (mandated by GIC spec).
      */
-    qdev_prop_set_uint32(vms->gic, "num-irq", NUM_IRQS + 32);
+    qdev_prop_set_uint32(vms->gic, "num-irq",
+                         vms->gic_num_spis + GIC_INTERNAL);
     if (!kvm_irqchip_in_kernel() && !hvf_irqchip_in_kernel()) {
         qdev_prop_set_bit(vms->gic, "has-security-extensions", vms->secure);
     }
@@ -3658,6 +3662,45 @@ static void virt_set_gic_version(Object *obj, const char *value, Error **errp)
     }
 }
 
+static void virt_get_gic_num_spis(Object *obj, Visitor *v,
+                                  const char *name, void *opaque,
+                                  Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+    uint32_t num_spis = vms->gic_num_spis;
+
+    visit_type_uint32(v, name, &num_spis, errp);
+}
+
+static void virt_set_gic_num_spis(Object *obj, Visitor *v,
+                                  const char *name, void *opaque,
+                                  Error **errp)
+{
+    VirtMachineState *vms = VIRT_MACHINE(obj);
+    uint32_t num_spis;
+
+    if (!visit_type_uint32(v, name, &num_spis, errp)) {
+        return;
+    }
+
+    if (num_spis < NUM_IRQS) {
+        error_setg(errp, "gic-num-spis must be at least %d", NUM_IRQS);
+        return;
+    }
+    if (num_spis > MAX_GIC_SPIS) {
+        error_setg(errp, "gic-num-spis exceeds GIC maximum %d",
+                   MAX_GIC_SPIS);
+        return;
+    }
+    if (num_spis % GIC_INTERNAL) {
+        error_setg(errp, "gic-num-spis must be divisible by %d",
+                   GIC_INTERNAL);
+        return;
+    }
+
+    vms->gic_num_spis = num_spis;
+}
+
 static char *virt_get_iommu(Object *obj, Error **errp)
 {
     VirtMachineState *vms = VIRT_MACHINE(obj);
@@ -4282,6 +4325,14 @@ static void virt_machine_class_init(ObjectClass *oc, const void *data)
                                           "Set GIC version. "
                                           "Valid values are 2, 3, 4, x-5, host and max");
 
+    object_class_property_add(oc, "gic-num-spis", "uint32",
+                              virt_get_gic_num_spis,
+                              virt_set_gic_num_spis,
+                              NULL, NULL);
+    object_class_property_set_description(oc, "gic-num-spis",
+                                          "Set the number of external GIC "
+                                          "SPI interrupt lines");
+
     object_class_property_add_str(oc, "iommu", virt_get_iommu, virt_set_iommu);
     object_class_property_set_description(oc, "iommu",
                                           "Set the IOMMU type. "
@@ -4368,6 +4419,7 @@ static void virt_instance_init(Object *obj)
     vms->highmem = true;
     vms->highmem_compact = !vmc->no_highmem_compact;
     vms->gic_version = VIRT_GIC_VERSION_NOSEL;
+    vms->gic_num_spis = NUM_IRQS;
 
     vms->highmem_ecam = true;
     vms->highmem_mmio = true;

@@ -2,19 +2,35 @@
 
 Welcome! This is a QEMU fork that adds **hedgehog**, a Python embedding library for using QEMU CPUs like Unicorn for binary analysis, fuzzing, and dynamic instrumentation.
 
+## Custom Instruction Workflow
+
+Start with `AGENTS.md`, then read `.instructions.md`. Select only the relevant
+guide under `.github/agents/` and use `HEDGEHOG_RESEARCH.SKILL.md` for
+cross-layer research. These files are usable as checklists even when the client
+does not provide automatic agent discovery or slash commands.
+
+Keep public work target-neutral. Do not track private target identifiers,
+target-derived register/reset data, firmware artifacts, workstation paths,
+credentials, dumps, or generated libraries. Follow the publication audit in
+`.instructions.md` before any proposed commit or push. Put investigation-only
+material under the ignored `.hedgehog-local/` directory and confirm the exact
+path with `git check-ignore -v`. Git and release mutations require explicit
+user authorization.
+
 ## Quick Start for New Developers
 
 ### 1. Orientation (5 minutes)
 - **What is hedgehog?** A Hedgehog-compatible Python API that wraps QEMU's in-tree C backend
 - **Where is it?** `python/qemu/hedgehog/` (Python) and `accel/hedgehog/` (C)
 - **How to build?** `./configure --enable-hedgehog --target-list=x86_64-softmmu,aarch64-softmmu`
-- **Current version?** `v0.1.1a9` (see tags in git log)
+- **Current version?** Run `git describe --tags --always`; do not hardcode it in
+  contributor instructions.
 
 ### 2. Read These Docs (In Order)
-1. **`.instructions.md`** (40 min) — Architecture, patterns, upstream management
-2. **`hedgehog.md`** (20 min) — Overview of in-tree implementation
-3. **`HEDGEHOG_RESEARCH.SKILL.md`** (as needed) — Deep-dive research guide
-4. **`AGENTS.md`** (10 min) — How to use the agent setup effectively
+1. **`AGENTS.md`** (10 min) — Repository-wide operating and safety rules
+2. **`.instructions.md`** (40 min) — Architecture, patterns, and publication checks
+3. **`hedgehog.md`** (20 min) — Overview of in-tree implementation
+4. **`HEDGEHOG_RESEARCH.SKILL.md`** (as needed) — Deep-dive research guide
 5. **`.github/agents/upstream-sync.agent.md`** (10 min) — Upstream synchronization workflow agent
 6. **`.github/agents/python-api-build-test.agent.md`** (10 min) — Python wheel build/test workflow agent
 7. **`.github/agents/feature-orchestrator.agent.md`** (10 min) — Feature planning and staged execution orchestrator
@@ -23,8 +39,7 @@ Welcome! This is a QEMU fork that adds **hedgehog**, a Python embedding library 
 
 ### 3. Set Up Your Environment
 ```bash
-# Clone this repo (you have it already at /home/eljakim/Source/qemu/)
-cd /home/eljakim/Source/qemu
+# Run these commands from the repository root.
 
 # Build hedgehog backend libraries
 mkdir -p build-hedgehog
@@ -67,10 +82,10 @@ EOF
 
 | Task | Start Here |
 |------|-----------|
-| **Add a new hook type** | `.instructions.md` → "Common Implementation Tasks" + `HEDGEHOG_RESEARCH.SKILL.md` Workflow 2 |
-| **Merge upstream QEMU** | `/memories/repo/qemu_upstream_merge_strategy.md` |
+| **Add a new hook type** | `.instructions.md` → "Common Tasks" + `HEDGEHOG_RESEARCH.SKILL.md` Workflow 2 |
+| **Merge upstream QEMU** | `.instructions.md` and `.github/agents/upstream-sync.agent.md` |
 | **Understand board vs machine mode** | `.instructions.md` → "Execution Models" +  `HEDGEHOG_RESEARCH.SKILL.md` Workflow 3 |
-| **Implement a new feature** | `.instructions.md` → "Implementation Patterns to Follow" |
+| **Implement a new feature** | `.instructions.md` → "Implementation Patterns" |
 | **Debug runtime issue** | Use `/troubleshoot` slash command + `.instructions.md` → "Troubleshooting" |
 | **Learn the architecture** | `HEDGEHOG_RESEARCH.SKILL.md` → "Code Reading Recommendations" |
 
@@ -78,7 +93,7 @@ EOF
 
 **Documentation:**
 ```
-/home/eljakim/Source/qemu/
+./
 ├── README.rst                      ← Original QEMU readme
 ├── hedgehog.md                     ← Hedgehog implementation overview
 ├── hedgehog_quickstart.md          ← Quick start examples
@@ -106,18 +121,11 @@ python/qemu/hedgehog/               ← Python layer (~1000 lines)
 └── __init__.py                     ← Package exports
 
 accel/hedgehog/                     ← C backend (~500 lines)
-├── backend.c                       ← Core implementation
+├── hedgehog.c                      ← Core implementation
 └── meson.build                     ← Build config
 
 accel/tcg/hedgehog*.c               ← TCG hook integration
 include/system/hedgehog*.h          ← C backend headers
-```
-
-**Configuration & Memory:**
-```
-/memories/repo/
-├── qemu_upstream_merge_strategy.md ← Git workflows & conflict resolution (NEW)
-└── hedgehog_*.md                   ← Previous analysis notes
 ```
 
 ## Key Concepts Quick Reference
@@ -155,12 +163,15 @@ Four modes for fuzzing feedback:
 - `digest`: BLAKE2b hash of block sequence
 - `edge_digest`: Hash of block transitions (AFL-style edges)
 
-## Agent System (NEW)
+## Agent System
 
-This repo now has **intelligent agent setup** for guided development:
+This repository includes task-specific guides for agent-assisted development.
 
-### Auto-Activated Agent
-When you edit files in `python/qemu/hedgehog/`, `accel/hedgehog/`, etc., an agent automatically activates with:
+### Hedgehog Guide
+
+Clients that support custom-agent discovery may select the Hedgehog guide when
+editing `python/qemu/hedgehog/`, `accel/hedgehog/`, and related files. Otherwise,
+open `.github/agents/hedgehog-core.agent.md` and apply it manually. It provides:
 - Full context about hedgehog architecture
 - Expert knowledge about implementation patterns
 - Guidance on upstream merges
@@ -206,12 +217,16 @@ For non-trivial features, use this sequence:
 
 This fork tracks QEMU's upstream while maintaining hedgehog features. Key strategies:
 
-### Quick Merge (One Command)
+### Authorized Sync Setup
+
+These are examples for an explicitly authorized sync. Inspect the worktree and
+agree on the sync method before configuring or invoking them.
+
 ```bash
 # Add upstream remote (one-time)
 git remote add upstream https://github.com/qemu/qemu.git
 
-# Setup git aliases (one-time) - see /memories/repo/qemu_upstream_merge_strategy.md
+# Optional local aliases; configure them only when the sync operation is authorized.
 git config alias.sync-rebase "!git fetch upstream && git rebase upstream/master"
 git config alias.hedgehog-build-test "!./configure --enable-hedgehog --target-list=x86_64-softmmu,aarch64-softmmu && ninja -C build-hedgehog"
 
@@ -221,7 +236,7 @@ git hedgehog-build-test
 ```
 
 ### Detailed Workflow
-See `/memories/repo/qemu_upstream_merge_strategy.md` for:
+Use `.instructions.md` and `.github/agents/upstream-sync.agent.md` for:
 - Step-by-step rebase/merge instructions
 - Conflict resolution by file type
 - Pre/post-sync checklists
@@ -236,37 +251,39 @@ Conflicts likely only in:
 ## Development Workflow
 
 ### For Features
-1. Create feature branch: `git checkout -b feature/my-feature`
+1. After explicit authorization, create a feature branch:
+   `git checkout -b feature/my-feature`
 2. Read `.instructions.md` → "Implementation Patterns"
 3. Implement in appropriate layer (C or Python)
 4. Test with: `./configure --enable-hedgehog && ninja -C build-hedgehog`
 5. Run examples from `hedgehog_quickstart.md`
-6. Merge: `git checkout master && git merge feature/my-feature`
+6. Merge only when explicitly requested and after reviewing the final diff.
 
 ### For Upstream Merges
-1. Reference `/memories/repo/qemu_upstream_merge_strategy.md`
-2. Use one-liner: `git sync-rebase` (after aliases setup)
-3. Resolve conflicts using guide
-4. Validate with: `git hedgehog-build-test`
-5. Run Python tests if they exist
+1. Inspect the branch, remotes, and dirty worktree without modifying them.
+2. Read `.instructions.md` and `.github/agents/upstream-sync.agent.md`.
+3. Choose the sync method explicitly and obtain authorization before changing
+   refs or the worktree.
+4. Resolve conflicts while keeping Hedgehog integration points narrow.
+5. Run native builds and Python tests.
 
 Tip: For complex conflicts, use the dedicated upstream sync agent and its `/resolve-conflicts` command.
-6. Tag and release: `git tag v0.X.Ya && git push origin v0.X.Ya`
 
 ### For Releases
 - Tag format: `v0.X.Ya` (alpha) or `v0.X.Y` (stable)
 - CI builds wheels and publishes to GitHub releases
-- Users can install: `pip install https://github.com/EljakimHerrewijnen/qemu/releases/download/...`
+- Tagging, publishing, and pushing are separate explicit operations; do not infer
+  authorization for them from development or validation work.
 
 ## Documentation Map
 
 | Document | Purpose | Read Time | When |
 |----------|---------|-----------|------|
 | `.instructions.md` | Core patterns & upstream | 40 min | **Start here** |
-| `.agent.md` | Agent config & capabilities | 5 min | Understanding automation |
+| `.github/agents/*.agent.md` | Task checklists | 5 min | Specialized workflows |
 | `AGENTS.md` | How to use agent setup | 10 min | Using the agents |
 | `HEDGEHOG_RESEARCH.SKILL.md` | Deep research guide | Variable | Learning architecture |
-| `/memories/repo/qemu_upstream_merge_strategy.md` | Git workflows | 30 min | Planning merges |
+| `.github/agents/upstream-sync.agent.md` | Git sync checklist | 10 min | Planning merges |
 | `hedgehog.md` | Implementation overview | 20 min | Implementation details |
 | `hedgehog_quickstart.md` | Quick start examples | 15 min | Getting started |
 | `python/qemu/hedgehog/docs.md` | Python API reference | 30 min | API usage |
@@ -275,10 +292,10 @@ Tip: For complex conflicts, use the dedicated upstream sync agent and its `/reso
 ## FAQ
 
 **Q: How do I add a new hook type?**
-A: See `.instructions.md` → "Common Implementation Tasks" → "Task: Add a New Hook Type"
+A: See `.instructions.md` → "Common Tasks" → "Add A New Hook Type".
 
 **Q: How do I merge upstream without losing hedgehog?**
-A: See `/memories/repo/qemu_upstream_merge_strategy.md` or use `/upstream` agent command
+A: Read `.instructions.md` and `.github/agents/upstream-sync.agent.md`.
 
 **Q: What's the difference between board and machine mode?**
 A: See `.instructions.md` → "Execution Models" or `HEDGEHOG_RESEARCH.SKILL.md` Workflow 3
@@ -293,19 +310,21 @@ A: Runtime-checkable protocols allow flexible backends (easy to mock for testing
 A: Yes! Package is published as `qemu` on PyPI wheels. See `hedgehog_quickstart.md` installation section
 
 **Q: What breaks when QEMU upstream changes?**
-A: Usually TCG integration or memory/CPU state APIs. See "Conflict Scenarios" in `/memories/repo/qemu_upstream_merge_strategy.md`
+A: Usually TCG integration or memory/CPU state APIs. Use the upstream-sync
+guide to inspect these hotspots before resolving conflicts.
 
 ## Support & Resources
 
 ### Inside This Repo
 - **Architecture questions:** Use `/research` or read `HEDGEHOG_RESEARCH.SKILL.md`
 - **Implementation guidance:** Use `/feature` or read `.instructions.md`
-- **Upstream helps:** Use `/upstream` or read `/memories/repo/qemu_upstream_merge_strategy.md`
+- **Upstream help:** Use `/upstream` when available or read
+  `.github/agents/upstream-sync.agent.md`.
 - **Bug reports:** Use `/troubleshoot` or check `.instructions.md` troubleshooting section
 
 ### External Resources
 - **QEMU upstream:** https://github.com/qemu/qemu
-- **This fork:** https://github.com/EljakimHerrewijnen/qemu
+- **This fork:** run `git remote get-url origin` for the configured location
 - **Hedgehog (original):** https://github.com/elasticfuzz/hedgehog (inspiration)
 - **Unicorn:** https://github.com/unicorn-engine/unicorn (similar purpose)
 
@@ -323,12 +342,11 @@ This documentation set was created to support sustainable development of the hed
 ## Next Steps
 
 1. **Read** `.instructions.md` (start immediately!)
-2. **Reference** `/memories/repo/qemu_upstream_merge_strategy.md` when doing git operations
+2. **Use** `.github/agents/upstream-sync.agent.md` when planning Git operations
 3. **Ask** the agent `/research`, `/feature`, `/upstream`, or `/troubleshoot` questions
-4. **Contribute** new findings back to `/memories/repo/`
+4. **Record** durable, non-sensitive findings in tracked documentation
 
 ---
 
-**Last Updated:** May 4, 2026
-**Hedgehog Version:** v0.1.1a9
-**QEMU Fork:** EljakimHerrewijnen/qemu
+The current version and fork URL are intentionally derived from Git rather than
+hardcoded in this document.

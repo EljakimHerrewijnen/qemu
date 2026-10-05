@@ -180,6 +180,7 @@ struct VirtMachineState {
     bool second_ns_uart_present;
     OnOffAuto acpi;
     VirtGICType gic_version;
+    uint32_t gic_num_spis;
     VirtIOMMUType iommu;
     bool default_bus_bypass_iommu;
     VirtMSIControllerType msi_controller;

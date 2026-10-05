@@ -33,6 +33,7 @@
 #include "semihosting/common-semi.h"
 #endif
 #include "cpregs.h"
+#include "system/hedgehog-exec-hooks.h"
 #include "target/arm/gtimer.h"
 #include "qemu/plugin.h"
 
@@ -1558,6 +1559,18 @@ static void gt_recalc_timer(ARMCPU *cpu, int timeridx)
         trace_arm_gt_recalc_disabled(timeridx);
     }
     gt_update_irq(cpu, timeridx);
+}
+
+void gt_restore_timer(CPUARMState *env, int timeridx, uint64_t cval,
+                      uint32_t ctl)
+{
+    ARMCPU *cpu = env_archcpu(env);
+
+    g_assert(timeridx >= 0 && timeridx < NUM_GTIMERS);
+    env->cp15.c14_timer[timeridx].cval = cval;
+    /* ISTATUS is derived from the restored compare value and virtual clock. */
+    env->cp15.c14_timer[timeridx].ctl = ctl & 3;
+    gt_recalc_timer(cpu, timeridx);
 }
 
 static void gt_timer_reset(CPUARMState *env, const ARMCPRegInfo *ri,
@@ -9618,6 +9631,32 @@ static void tcg_handle_semihosting(CPUState *cs)
  *       and KVM to re-inject guest debug exceptions, and to
  *       inject a Synchronous-External-Abort.
  */
+static void arm_cpu_report_system_call_route(CPUState *cs)
+{
+    ARMCPU *cpu = ARM_CPU(cs);
+    CPUARMState *env = &cpu->env;
+    HedgehogSystemCallKind kind;
+
+    if (!is_a64(env)) {
+        return;
+    }
+    switch (syn_get_ec(env->exception.syndrome)) {
+    case EC_AA64_SVC:
+        kind = HEDGEHOG_SYSTEM_CALL_SVC;
+        break;
+    case EC_AA64_HVC:
+        kind = HEDGEHOG_SYSTEM_CALL_HVC;
+        break;
+    case EC_AA64_SMC:
+        kind = HEDGEHOG_SYSTEM_CALL_SMC;
+        break;
+    default:
+        return;
+    }
+    hedgehog_exec_hook_system_call_route(
+        cs, kind, env->pc, env->exception.target_el);
+}
+
 void arm_cpu_do_interrupt(CPUState *cs)
 {
     ARMCPU *cpu = ARM_CPU(cs);
@@ -9663,6 +9702,10 @@ void arm_cpu_do_interrupt(CPUState *cs)
      * cs->interrupt_request.
      */
     g_assert(bql_locked());
+
+    /* Host-handled PSCI calls returned above. Only an exception that will
+     * enter its architectural target EL confirms a system-call route. */
+    arm_cpu_report_system_call_route(cs);
 
     arm_call_pre_el_change_hook(cpu);
 

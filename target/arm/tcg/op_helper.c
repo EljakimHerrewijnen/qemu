@@ -21,11 +21,13 @@
 #include "cpu.h"
 #include "exec/target_page.h"
 #include "helper.h"
+#include "helper-a64.h"
 #include "internals.h"
 #include "cpu-features.h"
 #include "accel/tcg/cpu-loop.h"
 #include "accel/tcg/probe.h"
 #include "cpregs.h"
+#include "system/hedgehog-exec-hooks.h"
 
 #define SIGNBIT (uint32_t)0x80000000
 #define SIGNBIT64 ((uint64_t)1 << 63)
@@ -403,6 +405,8 @@ void HELPER(wfi)(CPUARMState *env, uint32_t insn_len)
                         target_el);
     }
 
+    hedgehog_exec_hook_cpu_wait(
+        cs, HEDGEHOG_CPU_WAIT_WFI, env->pc, arm_current_el(env));
     env->halt_reason = HALT_WFI;
     cs->exception_index = EXCP_HLT;
     cs->halted = 1;
@@ -1318,6 +1322,17 @@ void HELPER(pre_hvc)(CPUARMState *env)
         raise_exception(env, EXCP_UDEF, syn_uncategorized(),
                         exception_target_el(env));
     }
+}
+
+void HELPER(hedgehog_system_call)(CPUARMState *env, uint32_t kind,
+                                  uint32_t syndrome)
+{
+    if (!is_a64(env)) {
+        return;
+    }
+    hedgehog_exec_hook_system_call_request(
+        env_cpu(env), (HedgehogSystemCallKind)kind, env->pc,
+        arm_current_el(env), syndrome & 0xffff, env->xregs);
 }
 
 void HELPER(pre_smc)(CPUARMState *env, uint32_t syndrome)

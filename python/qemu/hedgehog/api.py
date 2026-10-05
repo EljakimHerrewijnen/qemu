@@ -13,7 +13,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, Optional, Set, Tuple, Union
 
-from .backend import BackendProtocol, NativeBackend
+from .backend import BackendProtocol, InvalidMemoryDiagnostic, NativeBackend
 from .constants import (
     QEMU_MEMTX_ACCESS_ERROR,
     QEMU_MEMTX_DECODE_ERROR,
@@ -24,6 +24,8 @@ from .constants import (
     QEMU_HEDGEHOG_RUN_BUDGET_EXHAUSTED,
     QEMU_HEDGEHOG_RUN_EXCEPTION,
     QEMU_HEDGEHOG_RUN_INVALID_MEMORY,
+    HEDGEHOG_ARCH_ARM,
+    HEDGEHOG_ARCH_ARM64,
     HEDGEHOG_ARCH_X86,
     HEDGEHOG_ERR_ARCH,
     HEDGEHOG_ERR_ARG,
@@ -39,6 +41,7 @@ from .constants import (
     HEDGEHOG_ERR_WRITE_UNMAPPED,
     HEDGEHOG_HOOK_BLOCK,
     HEDGEHOG_HOOK_CODE,
+    HEDGEHOG_HOOK_INSN_INVALID,
     HEDGEHOG_HOOK_MEM_FETCH_UNMAPPED,
     HEDGEHOG_HOOK_MEM_INVALID,
     HEDGEHOG_HOOK_MEM_READ,
@@ -66,6 +69,10 @@ _EXEC_HOOK_MASK = (
     HEDGEHOG_HOOK_CODE
 )
 
+_INVALID_INSN_PASS = 0
+_INVALID_INSN_CONTINUE = 1
+_INVALID_INSN_STOP = 2
+
 _MEM_RW_MASK = (
     HEDGEHOG_HOOK_MEM_READ |
     HEDGEHOG_HOOK_MEM_WRITE
@@ -73,6 +80,7 @@ _MEM_RW_MASK = (
 
 _SUPPORTED_HOOK_MASK = (
     _EXEC_HOOK_MASK |
+    HEDGEHOG_HOOK_INSN_INVALID |
     _MEM_RW_MASK |
     _MEM_INVALID_MASK
 )
@@ -117,14 +125,26 @@ class _MappedRegion:
     kind: str
 
 
+@dataclass(frozen=True)
+class InvalidInstruction:
+    """An instruction QEMU could not decode for the selected CPU model."""
+
+    pc: int
+    data: bytes
+    size: int
+    syndrome: int
+    exception_index: int
+
+
 class Hedgehog:
     """
     Hedgehog-compatible emulator object.
 
-    The constructor mirrors Hedgehog's ``Hedgehog(arch, mode)`` and accepts two
+    The constructor mirrors Hedgehog's ``Hedgehog(arch, mode)`` and accepts
     optional keyword-only extensions:
     - ``cpu_type`` to override QEMU CPU type selection;
     - ``machine_type`` to choose the QEMU machine type used by the backend;
+    - ``cpu_properties`` to set pre-realize CPU properties in machine mode;
     - ``backend`` to inject a custom backend implementation.
     """
 
@@ -138,6 +158,7 @@ class Hedgehog:
         chardevs: Optional[Dict[str, str]] = None,
         property_bindings: Optional[Dict[str, Dict[str, str]]] = None,
         serial_backends: Optional[Dict[int, str]] = None,
+        cpu_properties: Optional[Dict[str, str]] = None,
         backend: Optional[BackendProtocol] = None,
         library_path: Optional[str] = None,
         coverage: Union[bool, str, Iterable[str]] = False,
@@ -153,12 +174,24 @@ class Hedgehog:
                     HEDGEHOG_ERR_ARCH,
                     'unsupported arch/mode; provide cpu_type explicitly',
                 )
+
+            merged_bindings = {
+                object_path: dict(bindings)
+                for object_path, bindings in (property_bindings or {}).items()
+            }
+
+            if cpu_properties:
+                cpu_path = '/machine/unattached/cpu'
+                if cpu_path not in merged_bindings:
+                    merged_bindings[cpu_path] = {}
+                merged_bindings[cpu_path].update(cpu_properties)
+
             backend = NativeBackend.create(
                 selected_cpu,
                 machine_type=machine_type,
                 library_path=library_path,
                 chardevs=chardevs,
-                property_bindings=property_bindings,
+                property_bindings=merged_bindings if merged_bindings else None,
                 serial_backends=serial_backends,
             )
 
@@ -190,6 +223,7 @@ class Hedgehog:
         self._pending_exception: Optional[BaseException] = None
         self._last_invalid_access: Optional[int] = None
         self._regions: Dict[Tuple[int, int, str], _MappedRegion] = {}
+        self._closed = False
 
         self._coverage_modes = _normalize_coverage_modes(coverage)
         self._coverage_block_pcs: Set[int] = set()
@@ -202,7 +236,22 @@ class Hedgehog:
 
     def close(self) -> None:
         """Close the backend and release resources."""
+        if self._closed:
+            return
+
+        # Caller-owned host buffers and Python MMIO callback bridges must stay
+        # alive until QEMU has removed every MemoryRegion and passed an RCU
+        # grace period.  NativeBackend.close() clears those bridges, so unmap
+        # first and only mark the wrapper closed after all teardown succeeds.
+        regions = tuple(self._regions.values())
+        if regions:
+            unmap_base = min(region.base for region in regions)
+            unmap_end = max(region.base + region.size for region in regions)
+            if not self._backend.unmap(unmap_base, unmap_end - unmap_base):
+                raise HedgehogError(HEDGEHOG_ERR_MAP, 'unable to unmap memory on close')
+            self._regions.clear()
         self._backend.close()
+        self._closed = True
 
     def __enter__(self) -> 'Hedgehog':
         return self
@@ -236,6 +285,37 @@ class Hedgehog:
         name = f'uc-ram-{address:x}'
         if not self._backend.map_ram(name, address, size):
             raise HedgehogError(HEDGEHOG_ERR_MAP, 'unable to map RAM region')
+
+        self._regions[(int(address), int(size), 'ram')] = _MappedRegion(
+            base=int(address),
+            size=int(size),
+            perms=int(perms),
+            kind='ram',
+        )
+
+    def mem_map_ptr(
+        self,
+        address: int,
+        size: int,
+        perms: int,
+        ptr: int,
+    ) -> None:
+        """Map caller-owned host memory directly into the guest RAM address space.
+
+        The caller must keep the complete ``size`` byte host allocation alive
+        until this mapping is unmapped or the Hedgehog instance is closed.
+        """
+        if address < 0 or size <= 0 or ptr <= 0:
+            raise HedgehogError(
+                HEDGEHOG_ERR_ARG,
+                'address, size, and host pointer must be positive',
+            )
+        if perms & ~HEDGEHOG_PROT_ALL:
+            raise HedgehogError(HEDGEHOG_ERR_ARG, 'invalid memory protection flags')
+
+        name = f'uc-ram-ptr-{address:x}'
+        if not self._backend.map_ram_ptr(name, address, size, ptr):
+            raise HedgehogError(HEDGEHOG_ERR_MAP, 'unable to map host-backed RAM region')
 
         self._regions[(int(address), int(size), 'ram')] = _MappedRegion(
             base=int(address),
@@ -362,7 +442,7 @@ class Hedgehog:
         if isinstance(value, int):
             if value < 0:
                 raise HedgehogError(HEDGEHOG_ERR_ARG, 'integer register values must be >= 0')
-            nbytes = max(1, (value.bit_length() + 7) // 8)
+            nbytes = _integer_register_width(self.arch, reg_id, value)
             payload = value.to_bytes(nbytes, byteorder='little', signed=False)
         else:
             payload = bytes(value)
@@ -389,6 +469,7 @@ class Hedgehog:
         - HEDGEHOG_HOOK_CODE
         - HEDGEHOG_HOOK_MEM_READ
         - HEDGEHOG_HOOK_MEM_WRITE
+        - HEDGEHOG_HOOK_INSN_INVALID
         - HEDGEHOG_HOOK_MEM_INVALID and unmapped memory subsets
         """
         del arg1
@@ -464,6 +545,28 @@ class Hedgehog:
             end=int(end),
         )
 
+    def hook_invalid_instruction(
+        self,
+        callback: HookCallback,
+        user_data: object = None,
+        begin: int = 1,
+        end: int = 0,
+    ) -> int:
+        """Register a callback for instructions rejected by the CPU model.
+
+        The callback receives ``(emu, instruction, user_data)``. Returning
+        ``True`` handles the instruction and advances by its decoded size.
+        Returning an integer supplies an explicit next PC. Returning ``False``
+        or ``None`` leaves the exception to QEMU's normal guest handling.
+        """
+        return self.hook_add(
+            HEDGEHOG_HOOK_INSN_INVALID,
+            callback,
+            user_data=user_data,
+            begin=int(begin),
+            end=int(end),
+        )
+
     def hook_mem_read(
         self,
         begin: int,
@@ -523,6 +626,7 @@ class Hedgehog:
         if timeout != 0:
             raise HedgehogError(HEDGEHOG_ERR_RESOURCE, 'timeout-based execution is unsupported')
 
+        self._backend.reset_stop()
         self._pending_exception = None
         self._last_invalid_access = None
         self._backend.set_pc(begin)
@@ -583,6 +687,18 @@ class Hedgehog:
         """
         return self._backend.run(max_instructions)
 
+    def qemu_reset_stop(self) -> None:
+        """Clear prior stop state before arming a new asynchronous run."""
+        self._backend.reset_stop()
+
+    def qemu_set_hard_interrupt(self, asserted: bool) -> None:
+        """Drive the CPU's level-triggered hard interrupt input."""
+        if not self._backend.set_hard_interrupt(bool(asserted)):
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                "failed to update the CPU hard interrupt input",
+            )
+
     def qemu_chardev_add(self, chardev_id: str, uri: str) -> None:
         """QEMU-specific helper to create a named chardev backend."""
         if not self._backend.add_chardev(chardev_id, uri):
@@ -623,9 +739,182 @@ class Hedgehog:
             )
         return endpoint
 
+    def qemu_connect_cpu_output(self, index: int, callback: Callable[[int, bool], None]) -> None:
+        """Connect an anonymous CPU output before native execution.
+
+        Events are delivered in order on the direct-run caller, outside BQL.
+        The callback receives (output index, asserted level).
+        """
+        if not self._backend.connect_cpu_output(int(index), callback):
+            raise HedgehogError(HEDGEHOG_ERR_RESOURCE, 'failed to connect CPU output')
+
+    def qemu_connect_system_call_observer(
+        self, callback: Callable[[Any], None],
+    ) -> None:
+        """Observe native AArch64 SVC/HVC/SMC request and return events.
+
+        The observer is setup-only. Its callback runs on the direct-run caller
+        outside QEMU's BQL and receives a ``backend.SystemCallEvent`` snapshot.
+        """
+        if not self._backend.connect_system_call_observer(callback):
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                'failed to connect system-call observer',
+            )
+
+    def qemu_connect_cpu_wait_observer(self, callback: Callable[[Any], None]) -> None:
+        """Observe accepted native CPU waits before execution blocks.
+
+        The setup-only callback is observational and runs on the direct-run
+        caller outside QEMU's BQL.
+        """
+        if not self._backend.connect_cpu_wait_observer(callback):
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                'failed to connect CPU-wait observer',
+            )
+
+    def qemu_connect_cpu_reset_observer(self, callback: Callable[[], None]) -> None:
+        """Observe a queued reset after QEMU has completed its CPU reset.
+
+        The setup-only callback is a post-reset notification on the direct-run
+        caller outside QEMU's BQL. It neither receives nor modifies guest
+        architectural state.
+        """
+        if not self._backend.connect_cpu_reset_observer(callback):
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                'failed to connect CPU-reset observer',
+            )
+
+    def qemu_request_cpu_reset(self) -> None:
+        """Queue a normal standalone architectural CPU reset.
+
+        The reset occurs at the direct-run event boundary; this method never
+        supplies a guest PC, register, or memory value.
+        """
+        if not self._backend.request_cpu_reset():
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                'failed to request architectural CPU reset',
+            )
+
+    def qemu_connect_virtual_timer(self, callback: Callable[[], None]) -> None:
+        """Connect one standalone device deadline callback before execution."""
+        if not self._backend.connect_virtual_timer(callback):
+            raise HedgehogError(HEDGEHOG_ERR_RESOURCE, 'virtual timer connection failed')
+
+    def qemu_arm_virtual_timer(self, deadline_ns: Optional[int]) -> None:
+        """Arm an absolute virtual nanosecond deadline; None cancels it."""
+        if not self._backend.arm_virtual_timer(-1 if deadline_ns is None else int(deadline_ns)):
+            raise HedgehogError(HEDGEHOG_ERR_RESOURCE, 'virtual timer is not connected')
+
+    def qemu_virtual_clock_ns(self) -> int:
+        """Observe native guest nanoseconds; standalone host pauses are frozen."""
+        return self._backend.virtual_clock_ns()
+
     def qemu_events_poll(self, block: bool = False) -> int:
         """QEMU-specific helper to pump host-backend event sources."""
         return self._backend.poll_events(block)
+
+    def qemu_set_aarch64_reset_state(
+        self,
+        *,
+        current_el: int = 3,
+        secure: bool = True,
+    ) -> None:
+        """Set standalone AArch64 reset/current state for firmware entry."""
+        if not self._backend.set_aarch64_reset_state(int(current_el), bool(secure)):
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                (
+                    f'failed to set AArch64 reset state '
+                    f'EL{current_el} {"secure" if secure else "non-secure"}'
+                ),
+            )
+
+    def qemu_add_aarch64_cp_reg(
+        self,
+        opc0: int,
+        opc1: int,
+        crn: int,
+        crm: int,
+        opc2: int,
+        *,
+        min_el: int = 1,
+        readable: bool = True,
+        writable: bool = True,
+        reset_value: int = 0,
+    ) -> None:
+        """Add a stored standalone AArch64 system register before execution."""
+        if not self._backend.add_aarch64_cp_reg(
+            int(opc0), int(opc1), int(crn), int(crm), int(opc2),
+            int(min_el), bool(readable), bool(writable), int(reset_value),
+        ):
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                (
+                    'failed to add AArch64 CPREG '
+                    f'S{opc0}_{opc1}_C{crn}_C{crm}_{opc2}'
+                ),
+            )
+
+    def qemu_set_aarch64_cp_reg_value(
+        self,
+        opc0: int,
+        opc1: int,
+        crn: int,
+        crm: int,
+        opc2: int,
+        *,
+        reset_value: int,
+        value: Optional[int] = None,
+    ) -> None:
+        """Override an existing AArch64 CPREG's live and reset values."""
+        live_value = int(reset_value if value is None else value)
+        if not self._backend.set_aarch64_cp_reg_value(
+            int(opc0), int(opc1), int(crn), int(crm), int(opc2),
+            int(reset_value), live_value,
+        ):
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                (
+                    'failed to set AArch64 CPREG '
+                    f'S{opc0}_{opc1}_C{crn}_C{crm}_{opc2}'
+                ),
+            )
+
+    def qemu_arm_diagnostics(self) -> Dict[str, object]:
+        """Read ARM CPU diagnostic state from the native QEMU backend."""
+        return dict(self._backend.arm_diagnostics())
+
+    def qemu_restore_arm_generic_timers(
+        self,
+        *,
+        virtual_clock_ns: int,
+        cvals: Iterable[int],
+        controls: Iterable[int],
+    ) -> None:
+        """Restore a stopped AArch64 CPU's captured generic-timer state."""
+        if not self._backend.restore_arm_generic_timers(
+            int(virtual_clock_ns), cvals, controls,
+        ):
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                'failed to restore AArch64 generic-timer state',
+            )
+
+    def qemu_set_invalid_memory_diagnostic_capture(self, enabled: bool = True) -> None:
+        """Enable bounded native invalid-memory diagnostics before execution."""
+        if not self._backend.set_invalid_memory_diagnostic_capture(bool(enabled)):
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                'native backend does not support invalid-memory diagnostics',
+            )
+
+    def qemu_last_invalid_memory_diagnostic(self) -> Optional[InvalidMemoryDiagnostic]:
+        """Return native details for the most recent failed memory access."""
+        return self._backend.last_invalid_memory_diagnostic()
 
     def clear_coverage(self) -> None:
         """Reset all collected coverage state."""
@@ -682,6 +971,10 @@ class Hedgehog:
     def _sync_backend_hooks(self) -> None:
         has_tb = any(reg.hook_type & HEDGEHOG_HOOK_BLOCK for reg in self._hooks.values())
         has_insn = any(reg.hook_type & HEDGEHOG_HOOK_CODE for reg in self._hooks.values())
+        has_invalid_insn = any(
+            reg.hook_type & HEDGEHOG_HOOK_INSN_INVALID
+            for reg in self._hooks.values()
+        )
         has_invalid = any(reg.hook_type & _MEM_INVALID_MASK for reg in self._hooks.values())
 
         has_tb = has_tb or self._coverage_needs_tb()
@@ -689,6 +982,9 @@ class Hedgehog:
 
         self._backend.set_tb_hook(self._dispatch_tb if has_tb else None)
         self._backend.set_insn_hook(self._dispatch_insn if has_insn else None)
+        self._backend.set_invalid_insn_hook(
+            self._dispatch_invalid_insn if has_invalid_insn else None,
+        )
         self._backend.set_invalid_mem_hook(
             self._dispatch_invalid_mem if has_invalid else None,
         )
@@ -824,6 +1120,50 @@ class Hedgehog:
         del response
         return not continue_exec
 
+    def _dispatch_invalid_insn(
+        self,
+        pc: int,
+        data: bytes,
+        size: int,
+        syndrome: int,
+        exception_index: int,
+    ) -> Tuple[int, int]:
+        instruction = InvalidInstruction(
+            pc=int(pc),
+            data=bytes(data),
+            size=int(size),
+            syndrome=int(syndrome),
+            exception_index=int(exception_index),
+        )
+
+        for reg in tuple(self._hooks.values()):
+            if not (reg.hook_type & HEDGEHOG_HOOK_INSN_INVALID):
+                continue
+            if not _address_in_range(instruction.pc, reg.begin, reg.end):
+                continue
+
+            try:
+                result = reg.callback(self, instruction, reg.user_data)
+                if result is None or result is False:
+                    continue
+                if result is True:
+                    return (
+                        _INVALID_INSN_CONTINUE,
+                        instruction.pc + instruction.size,
+                    )
+                if isinstance(result, int):
+                    if result < 0:
+                        raise ValueError('invalid-instruction next PC must be non-negative')
+                    return _INVALID_INSN_CONTINUE, int(result)
+                raise TypeError(
+                    'invalid-instruction hook must return None, bool, or an integer PC'
+                )
+            except BaseException as err:
+                self._pending_exception = err
+                return _INVALID_INSN_STOP, instruction.pc
+
+        return _INVALID_INSN_PASS, instruction.pc
+
     def _invalid_mem_error(self) -> HedgehogError:
         if self._last_invalid_access == QEMU_HEDGEHOG_MEM_ACCESS_WRITE:
             return HedgehogError(HEDGEHOG_ERR_WRITE_UNMAPPED)
@@ -840,6 +1180,33 @@ def _default_cpu_type(arch: int, mode: int) -> Optional[str]:
         return 'qemu64-x86_64-cpu'
 
     return None
+
+
+def _target_register_width(arch: int, reg_id: int) -> Optional[int]:
+    if arch == HEDGEHOG_ARCH_ARM64:
+        if 0 <= reg_id <= 32:
+            return 8
+        if reg_id == 33:
+            return 4
+
+    if arch == HEDGEHOG_ARCH_ARM:
+        if 0 <= reg_id <= 15 or reg_id == 25:
+            return 4
+
+    return None
+
+
+def _integer_register_width(arch: int, reg_id: int, value: int) -> int:
+    min_width = max(1, (value.bit_length() + 7) // 8)
+    target_width = _target_register_width(arch, reg_id)
+    if target_width is None:
+        return min_width
+    if min_width > target_width:
+        raise HedgehogError(
+            HEDGEHOG_ERR_ARG,
+            f'integer value does not fit register {reg_id} ({target_width} bytes)',
+        )
+    return target_width
 
 
 def _access_type_to_hook(access_type: int) -> int:

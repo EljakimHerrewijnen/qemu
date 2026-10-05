@@ -3,6 +3,19 @@
 ## Purpose
 Provide guidance for thorough exploration and analysis of the hedgehog module's architecture, implementation, and integration points. This skill helps researchers and developers understand the codebase structure, trace data flows, identify key components, and plan implementation work.
 
+## Before Research
+
+1. Read `AGENTS.md` and `.instructions.md`.
+2. Inspect `git status --short` and preserve unrelated dirty work.
+3. Keep research notes, examples, and proposed patches target-neutral. Do not
+   copy private identifiers, artifact paths, register/reset recipes, credentials,
+   dumps, or generated binaries into tracked files.
+4. Treat this file as a research checklist, not permission to mutate Git state
+   or publish anything. Commit, fetch, rebase, tag, and push only when explicitly
+   requested.
+5. Classify findings as QEMU-owned, Hedgehog-owned, or local-only before
+   proposing edits.
+
 ## When to Use This Skill
 - Exploring new areas of the hedgehog codebase
 - Understanding how features interact (Python ↔ C ↔ QEMU)
@@ -60,7 +73,7 @@ Provide guidance for thorough exploration and analysis of the hedgehog module's 
 ### C Backend Layer (`accel/hedgehog/`)
 
 **File Structure:**
-- `backend.c`: Core backend lifecycle and dispatch
+- `hedgehog.c`: Core backend lifecycle and dispatch
 - Related headers: `include/system/hedgehog-backend.h` (public API), `include/system/hedgehog-exec-hooks.h` (hook types)
 
 **Key Abstractions:**
@@ -92,7 +105,7 @@ Provide guidance for thorough exploration and analysis of the hedgehog module's 
 
 **Key Files:**
 - `python/qemu/hedgehog/api.py`: `hook_add()`, `_sync_backend_hooks()`
-- `accel/hedgehog/backend.c`: Hook registry and dispatch
+- `accel/hedgehog/hedgehog.c`: Backend lifecycle and hook registration
 - `accel/tcg/cpu-exec.c`: Hook call site
 - `accel/tcg/hedgehog-exec-hooks.c`: Hook implementation
 
@@ -129,7 +142,7 @@ Provide guidance for thorough exploration and analysis of the hedgehog module's 
 **Key Files:**
 - `python/qemu/hedgehog/api.py`: Constructor branch on `mode` parameter
 - `python/qemu/hedgehog/backend.py`: Backend initialization differs per mode
-- `accel/hedgehog/backend.c`: Separate code paths for `HEDGEHOG_MODE_BOARD` vs `HEDGEHOG_MODE_MACHINE`
+- `accel/hedgehog/hedgehog.c`: Separate standalone and machine-backed paths
 
 ### Workflow 4: Trace Coverage Tracking
 **Goal:** Understand deterministic coverage feedback mechanism

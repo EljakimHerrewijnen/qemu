@@ -34,4 +34,13 @@ Status notes:
   paths through ``qemu_chardev_get_endpoint()``;
 - host-connected backends are serviced explicitly with ``qemu_events_poll()``,
   which is useful when a guest is waiting on UART or similar device input;
+- unsupported instructions can be handled by a Python callback and resume at
+  the following instruction or an explicit next PC;
+- standalone AArch64 sessions can request an architectural EL/security reset
+  state without embedding machine-specific register profiles in the API;
+- standalone AArch64 sessions can add stored system registers or set existing
+  system-register live/reset values by architectural encoding before the first
+  run; unknown encodings still follow QEMU's exception behavior;
+- standalone sessions can map caller-owned host buffers as shared guest RAM
+  with ``mem_map_ptr()``;
 - only a subset of Hedgehog hooks is currently implemented.

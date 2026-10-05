@@ -1289,11 +1289,62 @@ io_prepare(hwaddr *out_offset, CPUState *cpu, CPUTLBEntryFull *full,
     return section;
 }
 
+static HedgehogMemAccessType hedgehog_access_type_from_mmu(
+    MMUAccessType access_type)
+{
+    switch (access_type) {
+    case MMU_DATA_STORE:
+        return HEDGEHOG_MEM_ACCESS_WRITE;
+    case MMU_INST_FETCH:
+        return HEDGEHOG_MEM_ACCESS_FETCH;
+    case MMU_DATA_LOAD:
+    default:
+        return HEDGEHOG_MEM_ACCESS_READ;
+    }
+}
+
+static HedgehogInvalidMemInfo hedgehog_invalid_mem_info(
+    CPUState *cpu, CPUTLBEntryFull *full, vaddr addr, unsigned size,
+    MMUAccessType access_type, int mmu_idx, MemTxResult response)
+{
+    HedgehogInvalidMemInfo info = {
+        .addr = addr,
+        .size = size,
+        .mmu_idx = mmu_idx,
+        .access_type = hedgehog_access_type_from_mmu(access_type),
+        .response = response,
+    };
+    MemoryRegionSection *section;
+    const char *name;
+
+    if (!full || !hedgehog_exec_hook_invalid_mem_diagnostic_capture_enabled(cpu)) {
+        return info;
+    }
+
+    info.translation_valid = true;
+    info.physical_address = full->phys_addr | (addr & ~TARGET_PAGE_MASK);
+    section = full->section;
+    if (!section || !section->mr) {
+        return info;
+    }
+
+    info.region_valid = true;
+    info.region_base = section->offset_within_address_space;
+    name = memory_region_name(section->mr);
+    if (name) {
+        g_strlcpy(info.region_name, name, sizeof(info.region_name));
+    }
+    return info;
+}
+
 static void io_failed(CPUState *cpu, CPUTLBEntryFull *full, vaddr addr,
                       unsigned size, MMUAccessType access_type, int mmu_idx,
                       MemTxResult response, uintptr_t retaddr)
 {
-    hedgehog_exec_hook_invalid(cpu, addr, size, access_type, response);
+    HedgehogInvalidMemInfo info = hedgehog_invalid_mem_info(
+        cpu, full, addr, size, access_type, mmu_idx, response);
+
+    hedgehog_exec_hook_invalid(cpu, &info);
 
     if (!cpu->ignore_memory_transaction_failures
         && cpu->cc->tcg_ops->do_transaction_failed) {
@@ -1380,8 +1431,11 @@ static int probe_access_internal(CPUState *cpu, vaddr addr,
             if (!tlb_fill_align(cpu, addr, access_type, mmu_idx,
                                 0, fault_size, nonfault, retaddr)) {
                 /* Non-faulting page table read failed.  */
-                hedgehog_exec_hook_invalid(cpu, addr, fault_size,
-                                          access_type, MEMTX_DECODE_ERROR);
+                HedgehogInvalidMemInfo info = hedgehog_invalid_mem_info(
+                    cpu, NULL, addr, fault_size, access_type, mmu_idx,
+                    MEMTX_DECODE_ERROR);
+
+                hedgehog_exec_hook_invalid(cpu, &info);
                 *phost = NULL;
                 *pfull = NULL;
                 return TLB_INVALID_MASK;

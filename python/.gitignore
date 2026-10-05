@@ -1,11 +1,16 @@
 # linter/tooling cache
 .mypy_cache/
+.pytest_cache/
+__pycache__/
 .cache/
 
 # python packaging
 build/
 dist/
 qemu.egg-info/
+
+# generated native libraries staged for wheel packaging
+qemu/hedgehog/_native/
 
 # editor config
 .idea/

@@ -24,6 +24,7 @@ The following major changes are now in-tree for this implementation:
     memory mapping, MMIO callback mapping, execution control, and register access.
 - Added hook integration through TCG execution and MMU paths:
     - TB/instruction callbacks in `accel/tcg/cpu-exec.c`
+    - undefined-instruction recovery callbacks in `accel/tcg/cpu-exec.c`
     - invalid-memory callbacks in `accel/tcg/cputlb.c`
 - Added public headers:
     - `include/system/hedgehog-backend.h`
@@ -59,7 +60,12 @@ The C surface centers on `HedgehogBackend` with APIs for:
 - registers: `hedgehog_backend_reg_read`, `hedgehog_backend_reg_write`
 - execution: `hedgehog_backend_set_pc`, `hedgehog_backend_get_pc`,
   `hedgehog_backend_run`, `hedgehog_backend_stop`
+- standalone AArch64 configuration:
+  `hedgehog_backend_set_aarch64_reset_state`,
+  `hedgehog_backend_add_aarch64_cp_reg`, and
+  `hedgehog_backend_set_aarch64_cp_reg_value`
 - hooks: `hedgehog_backend_set_tb_hook`, `hedgehog_backend_set_insn_hook`,
+  `hedgehog_backend_set_invalid_insn_hook`,
   `hedgehog_backend_set_invalid_mem_hook`
 
 ### 3. Memory Model
@@ -76,6 +82,8 @@ This keeps behavior aligned with normal QEMU memory and TLB/MMU handling.
 Hook dispatch is integrated via TCG execution and MMU paths:
 
 - translation-block and instruction hooks
+- undefined-instruction hooks that may pass the exception through, resume at
+  the following instruction, or choose an explicit next PC
 - invalid-memory hook path (unmapped/protection/fill failure scenarios)
 
 Run results include explicit statuses:
@@ -299,7 +307,8 @@ Current behavior:
     returns an error.
 - Board-backed machine types (for example `raspi3b`) run through machine
     realization and use the board-created CPU/memory model.
-- In board-backed mode, `mem_map` and `mem_map_mmio` are not supported.
+- In board-backed mode, `mem_map` is not supported; `mem_map_mmio` overlays
+    a callback-backed MMIO region onto the board system memory map.
 
 ## AArch64 Python Usage Example
 

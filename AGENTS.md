@@ -2,10 +2,29 @@
 
 This document explains the agent setup, instructions, and skills available for working on the hedgehog module and QEMU codebase.
 
+## How To Apply These Instructions
+
+`AGENTS.md` defines repository-wide behavior. Read `.instructions.md` next for
+implementation and publication rules, then load only the task-specific guide
+under `.github/agents/` that matches the work. Use
+`HEDGEHOG_RESEARCH.SKILL.md` for cross-layer investigation and design.
+
+Treat the custom-agent files as reusable checklists. Some clients discover them
+or expose slash commands automatically; others do not. The workflow and safety
+rules still apply in either case.
+
+Keep all public changes target-neutral. Do not put private target identifiers,
+target-derived register/reset recipes, artifact paths, credentials, dumps, or
+generated binaries in tracked files, commit messages, or release artifacts.
+Keep investigation-only material under `.hedgehog-local/`, which is ignored by
+the repository, and verify its exact path with `git check-ignore -v`.
+Before any commit or push, follow the publication audit in `.instructions.md`.
+Never perform a Git or release mutation unless the user explicitly requests it.
+
 ## Available Customization Files
 
 ### 1. `.instructions.md` (Core Development Guide)
-**Location:** `/home/eljakim/Source/qemu/.instructions.md`
+**Location:** `.instructions.md`
 
 **Purpose:** Comprehensive development guide covering:
 - Quick context (what is hedgehog, where it lives)
@@ -24,13 +43,13 @@ This document explains the agent setup, instructions, and skills available for w
 - Understanding design decisions
 
 **Key Sections:**
-- "Implementation Patterns to Follow"
-- "Upstream Management: Merging QEMU Commits"
-- "Common Implementation Tasks"
+- "Implementation Patterns"
+- "Upstream Management"
+- "Common Tasks"
 - "Troubleshooting"
 
 ### 2. `hedgehog-core.agent.md` (Agent Configuration)
-**Location:** `/home/eljakim/Source/qemu/.github/agents/hedgehog-core.agent.md`
+**Location:** `.github/agents/hedgehog-core.agent.md`
 
 **Purpose:** Defines the QEMU Hedgehog Module Development agent
 - Activates when working on files in hedgehog-related directories
@@ -38,8 +57,8 @@ This document explains the agent setup, instructions, and skills available for w
 - Lists expertise areas and responsibilities
 - Sets constraints and limitations
 
-**Auto-Activation:**
-Triggered when editing files matching:
+**Suggested scope:**
+Clients with custom-agent discovery may select this guide for files matching:
 - `python/qemu/hedgehog/**`
 - `accel/hedgehog/**`
 - `include/system/hedgehog*.h`
@@ -61,7 +80,7 @@ Triggered when editing files matching:
 ```
 
 ### 3. `HEDGEHOG_RESEARCH.SKILL.md` (Codebase Research Skill)
-**Location:** `/home/eljakim/Source/qemu/HEDGEHOG_RESEARCH.SKILL.md`
+**Location:** `HEDGEHOG_RESEARCH.SKILL.md`
 
 **Purpose:** Structured guidance for exploring the hedgehog codebase
 - Explains how different components fit together
@@ -83,33 +102,8 @@ Triggered when editing files matching:
 4. Trace coverage tracking
 5. Navigate between Python and C layers
 
-### 4. Repository Memory: `qemu_upstream_merge_strategy.md`
-**Location:** `/memories/repo/qemu_upstream_merge_strategy.md`
-
-**Purpose:** Detailed upstream merge workflow and conflict resolution
-- Repository structure implications for merging
-- Three merge strategies (rebase, merge, cherry-pick)
-- Step-by-step conflict resolution guide
-- Pre/post-sync checklists
-- Git aliases for convenience
-- Release process
-- Common problems & solutions
-
-**When to Reference:**
-- Planning an upstream merge
-- During merge conflicts
-- After merge to validate
-- Setting up git workflow
-- Publishing releases
-
-**Key Sections:**
-- "Merge Workflow Options"
-- "Handling Conflicts: Step-By-Step"
-- "Conflict Scenarios & Solutions"
-- "Pre-Sync/Post-Sync Checklists"
-
-### 5. `upstream-sync.agent.md` (Dedicated Upstream Sync Agent)
-**Location:** `/home/eljakim/Source/qemu/.github/agents/upstream-sync.agent.md`
+### 4. `upstream-sync.agent.md` (Dedicated Upstream Sync Agent)
+**Location:** `.github/agents/upstream-sync.agent.md`
 
 **Purpose:** Focused agent for syncing latest upstream QEMU while preserving hedgehog integration
 - Plans sync strategy (rebase, merge, cherry-pick)
@@ -126,8 +120,8 @@ Triggered when editing files matching:
 - `/resolve-conflicts`
 - `/validate-sync`
 
-### 6. `python-api-build-test.agent.md` (Python API Build/Test Agent)
-**Location:** `/home/eljakim/Source/qemu/.github/agents/python-api-build-test.agent.md`
+### 5. `python-api-build-test.agent.md` (Python API Build/Test Agent)
+**Location:** `.github/agents/python-api-build-test.agent.md`
 
 **Purpose:** Focused agent for wheel builds and Python API runtime validation
 - Builds native backend libraries and Python wheels
@@ -144,8 +138,8 @@ Triggered when editing files matching:
 - `/test-python-api`
 - `/release-check`
 
-### 7. `feature-orchestrator.agent.md` (Feature Planning Orchestrator)
-**Location:** `/home/eljakim/Source/qemu/.github/agents/feature-orchestrator.agent.md`
+### 6. `feature-orchestrator.agent.md` (Feature Planning Orchestrator)
+**Location:** `.github/agents/feature-orchestrator.agent.md`
 
 **Purpose:** Orchestrates feature work in staged steps from source research to implementation and optional Python API exposure
 - Enforces a research-first workflow with written artifacts
@@ -163,16 +157,16 @@ Triggered when editing files matching:
 - `/propose-edits`
 - `/expose-python`
 
-### 8. `qemu-feature-edit-proposal.agent.md` (Merge-Safe Edit Specialist)
-**Location:** `/home/eljakim/Source/qemu/.github/agents/qemu-feature-edit-proposal.agent.md`
+### 7. `qemu-feature-edit-proposal.agent.md` (Merge-Safe Edit Specialist)
+**Location:** `.github/agents/qemu-feature-edit-proposal.agent.md`
 
 **Purpose:** Produces file-by-file proposal documents and patch-set boundaries designed for future upstream merges
 
 **Output Artifact:**
 - `docs/hedgehog/feature-proposals/<feature-name>.md`
 
-### 9. `python-api-exposure.agent.md` (Python API Exposure Specialist)
-**Location:** `/home/eljakim/Source/qemu/.github/agents/python-api-exposure.agent.md`
+### 8. `python-api-exposure.agent.md` (Python API Exposure Specialist)
+**Location:** `.github/agents/python-api-exposure.agent.md`
 
 **Purpose:** Exposes backend capabilities through `qemu.hedgehog` API and aligns protocol/bridge/docs/tests changes
 
@@ -186,7 +180,7 @@ Triggered when editing files matching:
 ### Scenario 1: "I'm adding support for a new hook type"
 
 **Steps:**
-1. Open `.instructions.md` → "Common Implementation Tasks" → "Task: Add a New Hook Type"
+1. Open `.instructions.md` → "Common Tasks" → "Add A New Hook Type"
 2. Follow the 6-step implementation path (C header, Python constants, backend, integration, docs)
 3. Use `/feature` slash command to guide implementation
 4. Reference `HEDGEHOG_RESEARCH.SKILL.md` → "Workflow 2: Add a New Hook Type" for detailed walkthrough
@@ -197,12 +191,12 @@ Triggered when editing files matching:
 ### Scenario 2: "I need to merge upstream QEMU commits"
 
 **Steps:**
-1. Open `/memories/repo/qemu_upstream_merge_strategy.md` for detailed strategy
-2. Use git aliases from the file for one-command operations: `git sync-rebase`, `git hedgehog-build-test`
-3. Use `.instructions.md` → "Upstream Management" for quick reference on git workflow
-4. During conflicts, reference "Conflict Scenarios & Solutions" table in memory file
-5. Use checklists (Pre-Sync/Post-Sync) from memory file to validate
-6. Use `git hedgehog-test` alias to run full build validation
+1. Inspect the dirty worktree and current branch without changing either.
+2. Read `.instructions.md` → "Upstream Management".
+3. Apply `.github/agents/upstream-sync.agent.md` as the sync checklist.
+4. Choose rebase, merge, or cherry-pick explicitly before modifying refs.
+5. Preserve the narrow Hedgehog hook sites during conflict resolution.
+6. Build and test both the affected QEMU target and Hedgehog backend.
 
 **Expected Conflicts:**
 - `accel/tcg/cpu-exec.c` or `cputlb.c` (TCG changes)
@@ -211,7 +205,7 @@ Triggered when editing files matching:
 ### Scenario 3: "I'm new to hedgehog and want to understand the architecture"
 
 **Steps:**
-1. Start with `.instructions.md` → "Quick Context" and "Key Architectural Patterns"
+1. Start with `.instructions.md` → "Quick Context" and "Implementation Patterns"
 2. Read `HEDGEHOG_RESEARCH.SKILL.md` → "For Quick Understanding" (30 min) or "For Medium Deep Dive" (2-3 hours)
 3. Follow the recommended code reading path
 4. Use research workflows to understand specific components
@@ -231,7 +225,7 @@ Triggered when editing files matching:
 ## File Organization Reference
 
 ```
-/home/eljakim/Source/qemu/
+./
 ├── .instructions.md              ← Core development guide (start here!)
 ├── .github/agents/               ← Copilot-discovered custom agents
 │   ├── hedgehog-core.agent.md
@@ -251,12 +245,10 @@ Triggered when editing files matching:
 │   └── docs.md                   ← Python API reference
 ├── accel/hedgehog/               ← C backend implementation
 ├── include/system/hedgehog-*.h   ← C backend headers
-├── accel/tcg/
+└── accel/tcg/
 │   ├── hedgehog-exec-hooks.c     ← Hook implementation
 │   ├── cpu-exec.c                ← TB hook integration
 │   └── cputlb.c                  ← Invalid memory hook integration
-└── /memories/repo/
-    └── qemu_upstream_merge_strategy.md ← Git merge strategy
 ```
 
 ## Agent Capabilities Reference
@@ -348,16 +340,16 @@ For new features, follow this pipeline:
 
 ### For Coding Tasks
 1. Open the file you're about to edit
-2. Agent auto-activates if it's hedgehog-related
+2. Apply `.github/agents/hedgehog-core.agent.md` when the task is Hedgehog-related
 3. Ask specific questions (agent has full context)
 4. Use `.instructions.md` for reference patterns
 5. Reference `HEDGEHOG_RESEARCH.SKILL.md` for architecture questions
 
 ### For Git/Merge Tasks
-1. Reference `/memories/repo/qemu_upstream_merge_strategy.md`
-2. Use prepared git aliases for common operations
-3. Follow the step-by-step conflict resolution guide
-4. Run provided checklists before and after
+1. Read `.instructions.md` → "Upstream Management".
+2. Apply `.github/agents/upstream-sync.agent.md`.
+3. Inspect first; fetch, rebase, merge, and push only when explicitly requested.
+4. Run the documented validation before and after the authorized operation.
 
 ### For Learning
 1. Start with `.instructions.md` quick context
@@ -374,13 +366,16 @@ For new features, follow this pipeline:
 ## Keeping This Setup Current
 
 When updating the codebase:
-1. **Major feature:** Update both `.instructions.md` and `/memories/repo/qemu_upstream_merge_strategy.md` with new patterns
-2. **New research findings:** Add to `/memories/repo/` with `hedgehog_*` prefix
-3. **Merge conflicts:** Document solution and add to "Conflict Scenarios & Solutions" table
-4. **New common tasks:** Add to `.instructions.md` "Common Implementation Tasks" section
+1. **Major feature:** Update `.instructions.md` when it establishes a reusable pattern.
+2. **New research findings:** Put durable, non-sensitive findings in tracked docs.
+3. **Merge conflicts:** Document reusable resolutions in the upstream-sync guide.
+4. **New common tasks:** Add to `.instructions.md` "Common Tasks" section
 5. **API changes:** Update `HEDGEHOG_RESEARCH.SKILL.md` data flow diagrams
 
 ## Quick Command Reference
+
+The following commands are examples for an explicitly authorized sync. Do not
+configure remotes or run a sync merely because the commands appear here.
 
 ```bash
 # Setup upstream remote (one-time)
@@ -403,6 +398,6 @@ cd python && python -m pytest tests/  # If tests exist
 
 1. **Read** `.instructions.md` for overall context and patterns
 2. **Skim** `HEDGEHOG_RESEARCH.SKILL.md` to understand research workflows
-3. **Reference** `/memories/repo/qemu_upstream_merge_strategy.md` when doing git operations
-4. **Ask** specific questions using the hedgehog agent (auto-activated on relevant files)
-5. **Contribute** findings back to `/memories/repo/` for future reference
+3. **Apply** the relevant `.github/agents/` checklist for the task
+4. **Ask** specific questions using the client features that are available
+5. **Run** the publication-safety audit before proposing a commit or push
