@@ -147,7 +147,7 @@ QEMU Core (execution, memory, hooks)
 
 ### Two Execution Modes
 - **Board mode:** Manual memory management, no devices, fast (good for fuzzing)
-- **Machine mode:** Full QEMU machines (raspi3b, etc.), device models, real I/O
+- **Machine mode:** Full QEMU machines, device models, real I/O
 
 ### Hook System
 Callbacks can fire on:

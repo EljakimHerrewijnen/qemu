@@ -892,7 +892,7 @@ from qemu.hedgehog.constants import QEMU_HEDGEHOG_RUN_BUDGET_EXHAUSTED
 code = bytearray(0x1000)
 code[0x000:0x004] = bytes.fromhex('030000d4')  # smc #0
 code[0x004:0x008] = bytes.fromhex('1f2003d5')  # nop
-code[0x600:0x620] = bytes.fromhex(
+code[0x400:0x420] = bytes.fromhex(
     '0a113cd5'  # mrs x10, hcr_el2
     '4a0161b2'  # orr x10, x10, #0x80000000
     '0a111cd5'  # msr hcr_el2, x10
@@ -924,7 +924,7 @@ assert run_result == QEMU_HEDGEHOG_RUN_BUDGET_EXHAUSTED, (run_result, cpu_exit)
 
 in_el3 = emu.qemu_arm_diagnostics()
 assert in_el3['current_el'] == 3
-assert in_el3['pc'] == 0x600
+assert in_el3['pc'] == 0x400
 assert in_el3['elr_el3'] == 4
 assert in_el3['spsr_el3'] & 0xf == 5
 assert in_el3['esr_el3'] >> 26 == 0x17

@@ -1079,7 +1079,7 @@ static char *hedgehog_backend_machine_type_from_obj(Object *obj)
 static MachineClass *hedgehog_backend_find_machine_class(const char *name)
 {
     g_autoptr(GSList) machines =
-        object_class_get_list(target_machine_typename(), false);
+        object_class_get_list(TYPE_MACHINE, false);
     GSList *el;
 
     for (el = machines; el; el = el->next) {

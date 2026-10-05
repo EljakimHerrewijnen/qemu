@@ -20,7 +20,7 @@ The wrapper supports two execution models:
   is omitted or `None`.
 - **Machine-backed mode**: create a real QEMU machine and use its existing
   memory map and device models. Selected by passing a `machine_type` such as
-  `"raspi3b"`.
+  `"virt"`.
 
 ## Installation
 
@@ -70,7 +70,7 @@ emu = Hedgehog(
     HEDGEHOG_ARCH_ARM64,
     HEDGEHOG_MODE_ARM,
     cpu_type="cortex-a53",
-    machine_type="raspi3b",
+    machine_type="virt",
     chardevs={"console": "pty"},
     property_bindings={
         "/machine/soc/peripherals/uart0": {"chardev": "console"},
@@ -85,7 +85,7 @@ Arguments:
 - `cpu_type`: QEMU CPU type string. Required when no built-in default exists
   for the given `arch`/`mode` combination.
 - `machine_type`: QEMU machine type string. Omit for board-backed mode. Pass a
-  machine name such as `"raspi3b"` for machine-backed mode. This is fixed for
+  machine name such as `"virt"` for machine-backed mode. This is fixed for
   the life of the instance.
 - `chardevs`: optional mapping of chardev IDs to QEMU chardev URIs such as
   `"pty"`, `"stdio"`, or `"socket,..."`. Applied during construction before
@@ -392,7 +392,7 @@ emu = Hedgehog(
     HEDGEHOG_ARCH_ARM64,
     HEDGEHOG_MODE_ARM,
     cpu_type="cortex-a53",
-    machine_type="raspi3b",
+    machine_type="virt",
     chardevs={"console": "pty"},
     property_bindings={
         "/machine/soc/peripherals/uart0": {"chardev": "console"},

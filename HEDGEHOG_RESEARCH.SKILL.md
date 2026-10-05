@@ -134,7 +134,7 @@ Provide guidance for thorough exploration and analysis of the hedgehog module's 
    - No device models, no event loop
 
 2. **Machine Mode:**
-   - Constructor: `Hedgehog(Arch.ARM, Mode.MACHINE, machine_type="raspi3b")`
+   - Constructor: `Hedgehog(Arch.ARM, Mode.MACHINE, machine_type="virt")`
    - Memory: Inherited from machine's device tree (automatic)
    - Device I/O: Requires `qemu_run()` event pump between execution calls
    - Execution: `emu_start()` runs within QEMU's event loop context
@@ -232,7 +232,7 @@ Location: Likely `python/tests/` (if exists in repo)
 - Build with `--enable-hedgehog --target-list=x86_64-softmmu,aarch64-softmmu`
 - Run examples from `hedgehog_quickstart.md`
 - Test board mode with manual memory mapping
-- Test machine mode with raspi3b or similar
+- Test machine mode with a generic QEMU machine type
 
 ### Cross-Architecture Validation
 - Minimum: x86_64 and aarch64

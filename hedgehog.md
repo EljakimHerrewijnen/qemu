@@ -201,7 +201,7 @@ from qemu.hedgehog import (
 )
 
 # Point this to a shared library that exports hedgehog_backend_* symbols.
-os.environ["QEMU_HEDGEHOG_BACKEND_LIBRARY"] = "/home/me/qemu/build/libqemu-hedgehog-backend.so"
+os.environ["QEMU_HEDGEHOG_BACKEND_LIBRARY"] = "./build/libqemu-hedgehog-backend.so"
 
 BASE = 0x1000
 CODE = bytes([
@@ -252,7 +252,7 @@ from qemu.hedgehog import (
     HEDGEHOG_MODE_64,
 )
 
-os.environ["QEMU_HEDGEHOG_BACKEND_LIBRARY"] = "/home/me/qemu/build/libqemu-hedgehog-backend.so"
+os.environ["QEMU_HEDGEHOG_BACKEND_LIBRARY"] = "./build/libqemu-hedgehog-backend.so"
 
 try:
     emu = Hedgehog(
@@ -269,7 +269,7 @@ except HedgehogError as err:
     print(f"Hedgehog machine-type setup failed: {err}")
 ```
 
-Raspberry Pi 3B machine type example:
+Generic machine type example:
 
 ```python
 import os
@@ -281,14 +281,14 @@ from qemu.hedgehog import (
     HEDGEHOG_MODE_ARM,
 )
 
-os.environ["QEMU_HEDGEHOG_BACKEND_LIBRARY"] = "/home/me/qemu/build/libqemu-hedgehog-backend-aarch64.so"
+os.environ["QEMU_HEDGEHOG_BACKEND_LIBRARY"] = "./build/libqemu-hedgehog-backend-aarch64.so"
 
 try:
     emu = Hedgehog(
         HEDGEHOG_ARCH_ARM64,
         HEDGEHOG_MODE_ARM,
         cpu_type="cortex-a53",
-        machine_type="raspi3b",
+        machine_type="virt",
     )
 
     # Run a short bounded execution window, then close.
@@ -296,7 +296,7 @@ try:
     emu.close()
 
 except HedgehogError as err:
-    print(f"Hedgehog raspi3b setup failed: {err}")
+    print(f"Hedgehog machine setup failed: {err}")
 ```
 
 Current behavior:
@@ -305,7 +305,7 @@ Current behavior:
 - A process is locked to a single machine type after first Hedgehog
     initialization; attempting to switch machine type later in the same process
     returns an error.
-- Board-backed machine types (for example `raspi3b`) run through machine
+- Board-backed machine types run through machine
     realization and use the board-created CPU/memory model.
 - In board-backed mode, `mem_map` is not supported; `mem_map_mmio` overlays
     a callback-backed MMIO region onto the board system memory map.
@@ -324,7 +324,7 @@ from qemu.hedgehog import (
 )
 
 # Point this to a shared library that exports hedgehog_backend_* symbols.
-os.environ["QEMU_HEDGEHOG_BACKEND_LIBRARY"] = "/home/me/qemu/build/libqemu-hedgehog-backend-aarch64.so"
+os.environ["QEMU_HEDGEHOG_BACKEND_LIBRARY"] = "./build/libqemu-hedgehog-backend-aarch64.so"
 
 BASE = 0x400000
 
