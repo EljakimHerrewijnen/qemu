@@ -26,6 +26,10 @@ typedef struct HedgehogExecHookEntry {
     bool invalid_mem_diagnostic_capture;
     bool invalid_mem_diagnostic_valid;
     HedgehogInvalidMemInfo invalid_mem_diagnostic;
+    bool instruction_marker_resume_pending;
+    vaddr instruction_marker_resume_pc;
+    HedgehogInstructionMarkerFilterFunc instruction_marker_filter;
+    void *instruction_marker_filter_opaque;
     bool direct_run_active;
 } HedgehogExecHookEntry;
 
@@ -137,6 +141,90 @@ bool hedgehog_exec_hook_direct_run_active(CPUState *cpu)
     }
     g_mutex_unlock(&hedgehog_hooks_lock);
     return active;
+}
+
+bool hedgehog_exec_hook_consume_instruction_marker_resume(CPUState *cpu,
+                                                           vaddr pc)
+{
+    HedgehogExecHookEntry *entry;
+    bool resume = false;
+
+    if (!cpu) {
+        return false;
+    }
+
+    hedgehog_exec_hooks_ensure_init();
+    g_mutex_lock(&hedgehog_hooks_lock);
+    entry = g_hash_table_lookup(hedgehog_cpu_hooks, cpu);
+    if (entry && entry->instruction_marker_resume_pending &&
+        entry->instruction_marker_resume_pc == pc) {
+        entry->instruction_marker_resume_pending = false;
+        resume = true;
+    }
+    g_mutex_unlock(&hedgehog_hooks_lock);
+    return resume;
+}
+
+void hedgehog_exec_hook_resume_instruction_marker(CPUState *cpu, vaddr pc)
+{
+    HedgehogExecHookEntry *entry;
+
+    if (!cpu) {
+        return;
+    }
+
+    hedgehog_exec_hooks_ensure_init();
+    g_mutex_lock(&hedgehog_hooks_lock);
+    entry = g_hash_table_lookup(hedgehog_cpu_hooks, cpu);
+    if (entry) {
+        entry->instruction_marker_resume_pending = true;
+        entry->instruction_marker_resume_pc = pc;
+    }
+    g_mutex_unlock(&hedgehog_hooks_lock);
+}
+
+void hedgehog_exec_hook_set_instruction_marker_filter(
+    HedgehogBackend *uc, HedgehogInstructionMarkerFilterFunc filter_fn,
+    void *opaque)
+{
+    HedgehogExecHookEntry *entry;
+
+    if (!uc) {
+        return;
+    }
+
+    hedgehog_exec_hooks_ensure_init();
+    g_mutex_lock(&hedgehog_hooks_lock);
+    entry = g_hash_table_lookup(hedgehog_backend_hooks, uc);
+    if (entry) {
+        entry->instruction_marker_filter = filter_fn;
+        entry->instruction_marker_filter_opaque = opaque;
+    }
+    g_mutex_unlock(&hedgehog_hooks_lock);
+}
+
+bool hedgehog_exec_hook_instruction_marker_filtered_out(CPUState *cpu,
+                                                         vaddr pc)
+{
+    HedgehogExecHookEntry *entry;
+    HedgehogInstructionMarkerFilterFunc filter_fn = NULL;
+    HedgehogBackend *uc = NULL;
+    void *opaque = NULL;
+
+    if (!cpu) {
+        return false;
+    }
+
+    hedgehog_exec_hooks_ensure_init();
+    g_mutex_lock(&hedgehog_hooks_lock);
+    entry = g_hash_table_lookup(hedgehog_cpu_hooks, cpu);
+    if (entry) {
+        filter_fn = entry->instruction_marker_filter;
+        uc = entry->uc;
+        opaque = entry->instruction_marker_filter_opaque;
+    }
+    g_mutex_unlock(&hedgehog_hooks_lock);
+    return filter_fn && filter_fn(uc, cpu, pc, opaque);
 }
 
 void hedgehog_exec_hook_set_tb(HedgehogBackend *uc,

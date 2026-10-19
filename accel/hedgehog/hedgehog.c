@@ -29,12 +29,15 @@
 #include "accel/tcg/cpu-loop.h"
 #include "exec/cpu-common.h"
 #include "exec/cpu-interrupt.h"
+#include "exec/target_page.h"
+#include "exec/watchpoint.h"
 #include "system/cpus.h"
 #include "system/cpu-timers.h"
 #include "system/hedgehog-exec-hooks.h"
 #include "system/address-spaces.h"
 #include "system/system.h"
 #include "system/memory.h"
+#include "system/physmem.h"
 #include "system/tcg.h"
 #include "system/hedgehog-backend.h"
 #include "tcg/startup.h"
@@ -83,6 +86,9 @@ typedef struct HedgehogRAMRegion {
     hwaddr base;
     uint64_t size;
 } HedgehogRAMRegion;
+
+/* Stable host-facing collection granularity, independent of target pages. */
+#define HEDGEHOG_SNAPSHOT_PAGE_SIZE 0x1000
 
 typedef struct HedgehogMMIOMapping {
     HedgehogMMIODevice *dev;
@@ -137,6 +143,13 @@ typedef struct HedgehogCPUWaitEventNode {
     HedgehogCPUWaitEvent event;
 } HedgehogCPUWaitEventNode;
 
+typedef struct HedgehogInstructionMarkerAarch64GprFilter {
+    vaddr marker;
+    unsigned gpr_index;
+    uint64_t mask;
+    uint64_t expected;
+} HedgehogInstructionMarkerAarch64GprFilter;
+
 static void hedgehog_backend_free_system_call_pending(void *opaque)
 {
     g_free(opaque);
@@ -180,7 +193,25 @@ struct HedgehogBackend {
     bool stop_requested;
     bool invalid_mem_seen;
     HedgehogInvalidMemInfo invalid_mem_info;
+    GArray *instruction_markers;
+    GPtrArray *instruction_marker_breakpoints;
+    HedgehogExecHookFunc instruction_marker_hook;
+    void *instruction_marker_opaque;
+    GArray *instruction_marker_aarch64_gpr_filters;
+    CPUWatchpoint *write_watchpoint;
+    HedgehogExecHookFunc write_watchpoint_hook;
+    void *write_watchpoint_opaque;
+    bool write_watchpoint_hit;
+    vaddr write_watchpoint_address;
+    bool dirty_ram_tracking;
 };
+
+static void hedgehog_backend_clear_instruction_markers_locked(
+    HedgehogBackend *uc);
+static void hedgehog_backend_clear_write_watchpoint_locked(
+    HedgehogBackend *uc);
+static bool hedgehog_backend_instruction_marker_filtered_out(
+    HedgehogBackend *uc, CPUState *cpu, vaddr pc, void *opaque);
 
 static void hedgehog_backend_capture_virtual_timer(void *opaque)
 {
@@ -1668,6 +1699,10 @@ HedgehogBackend *hedgehog_backend_new_with_machine(const char *cpu_type,
     uc->ram_regions = g_ptr_array_new();
     uc->mmio_mappings = g_ptr_array_new();
     uc->cpu_output_links = g_ptr_array_new_with_free_func(g_free);
+    uc->instruction_markers = g_array_new(false, false, sizeof(vaddr));
+    uc->instruction_marker_breakpoints = g_ptr_array_new();
+    uc->instruction_marker_aarch64_gpr_filters = g_array_new(
+        false, false, sizeof(HedgehogInstructionMarkerAarch64GprFilter));
     g_queue_init(&uc->cpu_output_events);
     g_queue_init(&uc->system_call_events);
     g_queue_init(&uc->system_call_pending);
@@ -1762,6 +1797,8 @@ void hedgehog_backend_free(HedgehogBackend *uc)
         timer_free(uc->host_timer);
     }
     if (uc->cpu) {
+        hedgehog_backend_clear_instruction_markers_locked(uc);
+        hedgehog_backend_clear_write_watchpoint_locked(uc);
         for (i = 0; i < uc->cpu_output_links->len; i++) {
             HedgehogCPUOutputLink *link = g_ptr_array_index(uc->cpu_output_links, i);
             qdev_connect_gpio_out(DEVICE(uc->cpu), link->index, NULL);
@@ -1850,6 +1887,9 @@ void hedgehog_backend_free(HedgehogBackend *uc)
     }
 
     g_ptr_array_free(uc->cpu_output_links, true);
+    g_ptr_array_free(uc->instruction_marker_breakpoints, true);
+    g_array_free(uc->instruction_markers, true);
+    g_array_free(uc->instruction_marker_aarch64_gpr_filters, true);
     g_ptr_array_free(uc->mmio_mappings, true);
     hedgehog_backend_clear_system_call_events_locked(uc);
     g_ptr_array_free(uc->ram_regions, true);
@@ -1881,6 +1921,12 @@ static bool hedgehog_backend_map_ram_common(HedgehogBackend *uc,
     if (uc->board_backed) {
         error_setg(errp,
                    "RAM mapping is not supported for board-backed hedgehog backends");
+        return false;
+    }
+
+    if (uc->dirty_ram_tracking &&
+        ((addr | size) & (HEDGEHOG_SNAPSHOT_PAGE_SIZE - 1))) {
+        error_setg(errp, "dirty-RAM tracking requires 4 KiB-aligned RAM mappings");
         return false;
     }
 
@@ -1918,7 +1964,130 @@ static bool hedgehog_backend_map_ram_common(HedgehogBackend *uc,
     region->base = addr;
     region->size = size;
     memory_region_add_subregion(&uc->root, addr, &region->mr);
+    if (uc->dirty_ram_tracking) {
+        memory_region_set_log(&region->mr, true, DIRTY_MEMORY_VGA);
+    }
     g_ptr_array_add(uc->ram_regions, region);
+    return true;
+}
+
+static bool hedgehog_backend_ram_page_is_nonzero(
+    const uint8_t *data, size_t size)
+{
+    size_t index;
+
+    for (index = 0; index < size; index++) {
+        if (data[index]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool hedgehog_backend_set_dirty_ram_tracking(
+    HedgehogBackend *uc, bool enabled, Error **errp)
+{
+    guint i;
+
+    BQL_LOCK_GUARD();
+    if (!uc || uc->board_backed || uc->execution_started) {
+        error_setg(errp, "dirty-RAM tracking requires a fresh standalone backend");
+        return false;
+    }
+    if (enabled) {
+        for (i = 0; i < uc->ram_regions->len; i++) {
+            HedgehogRAMRegion *region = g_ptr_array_index(uc->ram_regions, i);
+
+            if ((region->base | region->size) &
+                (HEDGEHOG_SNAPSHOT_PAGE_SIZE - 1)) {
+                error_setg(errp, "dirty-RAM tracking requires 4 KiB-aligned RAM mappings");
+                return false;
+            }
+        }
+    }
+    for (i = 0; i < uc->ram_regions->len; i++) {
+        HedgehogRAMRegion *region = g_ptr_array_index(uc->ram_regions, i);
+
+        /* VGA logging is QEMU's independent per-region RAM dirty client. */
+        memory_region_set_log(&region->mr, enabled, DIRTY_MEMORY_VGA);
+    }
+    uc->dirty_ram_tracking = enabled;
+    return true;
+}
+
+bool hedgehog_backend_collect_dirty_ram_pages(
+    HedgehogBackend *uc, hwaddr *pages, size_t capacity, size_t *count,
+    bool nonzero_only, bool clear, Error **errp)
+{
+    size_t total = 0;
+    guint i;
+
+    BQL_LOCK_GUARD();
+
+    if (!uc || !count || uc->board_backed || !uc->dirty_ram_tracking) {
+        error_setg(errp,
+                   "dirty-RAM collection requires enabled standalone tracking and count");
+        return false;
+    }
+    if (uc->cpu && (qatomic_read(&uc->cpu->running) ||
+                    hedgehog_exec_hook_direct_run_active(uc->cpu))) {
+        error_setg(errp, "dirty-RAM collection requires a stopped CPU");
+        return false;
+    }
+    for (i = 0; i < uc->ram_regions->len; i++) {
+        HedgehogRAMRegion *region = g_ptr_array_index(uc->ram_regions, i);
+        ram_addr_t ram_base = memory_region_get_ram_addr(&region->mr);
+        const uint8_t *ram = memory_region_get_ram_ptr(&region->mr);
+        hwaddr offset;
+
+        for (offset = 0; offset < region->size;
+             offset += HEDGEHOG_SNAPSHOT_PAGE_SIZE) {
+            hwaddr page_size = MIN((hwaddr)HEDGEHOG_SNAPSHOT_PAGE_SIZE,
+                                   region->size - offset);
+            hwaddr dirty_offset;
+            bool dirty = false;
+
+            for (dirty_offset = 0; dirty_offset < page_size;
+                 dirty_offset += TARGET_PAGE_SIZE) {
+                if (physical_memory_get_dirty_flag(
+                        ram_base + offset + dirty_offset,
+                        DIRTY_MEMORY_VGA)) {
+                    dirty = true;
+                    break;
+                }
+            }
+            if (!dirty) {
+                continue;
+            }
+            if (nonzero_only && !hedgehog_backend_ram_page_is_nonzero(
+                                    ram + offset,
+                                    page_size)) {
+                continue;
+            }
+            if (pages) {
+                if (total >= capacity) {
+                    error_setg(errp, "dirty-RAM output buffer is too small");
+                    return false;
+                }
+                pages[total] = region->base + offset;
+            }
+            total++;
+        }
+    }
+
+    if (clear && !pages && total) {
+        error_setg(errp, "clearing non-empty dirty RAM requires an output buffer");
+        return false;
+    }
+
+    if (clear) {
+        for (i = 0; i < uc->ram_regions->len; i++) {
+            HedgehogRAMRegion *region = g_ptr_array_index(uc->ram_regions, i);
+            memory_region_reset_dirty(&region->mr, 0, region->size,
+                                      DIRTY_MEMORY_VGA);
+        }
+    }
+    *count = total;
     return true;
 }
 
@@ -2236,6 +2405,256 @@ void hedgehog_backend_set_insn_hook(HedgehogBackend *uc,
     hedgehog_exec_hook_set_insn(uc, hook_fn, opaque);
 }
 
+static void hedgehog_backend_clear_instruction_markers_locked(
+    HedgehogBackend *uc)
+{
+    guint i;
+
+    if (!uc) {
+        return;
+    }
+    if (uc->cpu && uc->instruction_marker_breakpoints) {
+        for (i = 0; i < uc->instruction_marker_breakpoints->len; i++) {
+            CPUBreakpoint *bp = g_ptr_array_index(
+                uc->instruction_marker_breakpoints, i);
+
+            cpu_breakpoint_remove_by_ref(uc->cpu, bp);
+        }
+    }
+    if (uc->instruction_marker_breakpoints) {
+        g_ptr_array_set_size(uc->instruction_marker_breakpoints, 0);
+    }
+    if (uc->instruction_markers) {
+        g_array_set_size(uc->instruction_markers, 0);
+    }
+    uc->instruction_marker_hook = NULL;
+    uc->instruction_marker_opaque = NULL;
+    if (uc->instruction_marker_aarch64_gpr_filters) {
+        g_array_set_size(uc->instruction_marker_aarch64_gpr_filters, 0);
+    }
+    hedgehog_exec_hook_set_instruction_marker_filter(uc, NULL, NULL);
+}
+
+static bool hedgehog_backend_has_instruction_marker(
+    const HedgehogBackend *uc, vaddr pc)
+{
+    guint i;
+
+    if (!uc || !uc->instruction_markers) {
+        return false;
+    }
+    for (i = 0; i < uc->instruction_markers->len; i++) {
+        if (g_array_index(uc->instruction_markers, vaddr, i) == pc) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static HedgehogInstructionMarkerAarch64GprFilter *
+hedgehog_backend_find_instruction_marker_aarch64_gpr_filter(
+    HedgehogBackend *uc, vaddr marker)
+{
+    guint i;
+
+    if (!uc || !uc->instruction_marker_aarch64_gpr_filters) {
+        return NULL;
+    }
+    for (i = 0; i < uc->instruction_marker_aarch64_gpr_filters->len; i++) {
+        HedgehogInstructionMarkerAarch64GprFilter *filter =
+            &g_array_index(uc->instruction_marker_aarch64_gpr_filters,
+                           HedgehogInstructionMarkerAarch64GprFilter, i);
+
+        if (filter->marker == marker) {
+            return filter;
+        }
+    }
+    return NULL;
+}
+
+static bool hedgehog_backend_instruction_marker_filter_matches(
+    HedgehogBackend *uc, CPUState *cpu, vaddr pc)
+{
+    const HedgehogInstructionMarkerAarch64GprFilter *filter;
+    const HedgehogArchOps *ops;
+    uint64_t gpr_value;
+
+    filter = hedgehog_backend_find_instruction_marker_aarch64_gpr_filter(
+        uc, pc);
+    if (!filter) {
+        return true;
+    }
+    ops = hedgehog_arch_ops();
+    if (!ops || !ops->read_aarch64_gpr ||
+        !ops->read_aarch64_gpr(cpu, filter->gpr_index, &gpr_value)) {
+        /* Do not silently suppress an observation if the diagnostic read fails. */
+        return true;
+    }
+    return (gpr_value & filter->mask) == filter->expected;
+}
+
+bool hedgehog_backend_set_instruction_markers(
+    HedgehogBackend *uc, const vaddr *markers, size_t marker_count,
+    HedgehogExecHookFunc hook_fn, void *opaque, Error **errp)
+{
+    size_t i;
+
+    BQL_LOCK_GUARD();
+
+    if (!uc || uc->board_backed || uc->execution_started) {
+        error_setg(errp,
+                   "Instruction markers require a fresh standalone backend");
+        return false;
+    }
+    if (marker_count && (!markers || !hook_fn)) {
+        error_setg(errp,
+                   "Instruction markers require addresses and a callback");
+        return false;
+    }
+
+    hedgehog_backend_clear_instruction_markers_locked(uc);
+    for (i = 0; i < marker_count; i++) {
+        CPUBreakpoint *bp;
+        vaddr pc = markers[i];
+
+        if (hedgehog_backend_has_instruction_marker(uc, pc)) {
+            continue;
+        }
+        if (cpu_breakpoint_insert(uc->cpu, pc,
+                                  BP_GDB | BP_HEDGEHOG_MARKER, &bp)) {
+            hedgehog_backend_clear_instruction_markers_locked(uc);
+            error_setg(errp, "failed to install instruction marker");
+            return false;
+        }
+        g_array_append_val(uc->instruction_markers, pc);
+        g_ptr_array_add(uc->instruction_marker_breakpoints, bp);
+    }
+    uc->instruction_marker_hook = hook_fn;
+    uc->instruction_marker_opaque = opaque;
+    return true;
+}
+
+bool hedgehog_backend_set_instruction_marker_aarch64_gpr_filter(
+    HedgehogBackend *uc, vaddr marker, unsigned gpr_index, uint64_t mask,
+    uint64_t expected, Error **errp)
+{
+    const HedgehogArchOps *ops;
+    uint64_t gpr_value;
+    HedgehogInstructionMarkerAarch64GprFilter *filter;
+    HedgehogInstructionMarkerAarch64GprFilter new_filter = {
+        .marker = marker,
+        .gpr_index = gpr_index,
+        .mask = mask,
+        .expected = expected,
+    };
+
+    BQL_LOCK_GUARD();
+
+    if (!uc || uc->board_backed || uc->execution_started) {
+        error_setg(errp,
+                   "Instruction-marker filters require a fresh standalone backend");
+        return false;
+    }
+    if (!uc->instruction_marker_hook ||
+        !hedgehog_backend_has_instruction_marker(uc, marker)) {
+        error_setg(errp,
+                   "Instruction-marker filters require an installed marker");
+        return false;
+    }
+    ops = hedgehog_arch_ops();
+    if (!ops || !ops->read_aarch64_gpr ||
+        !ops->read_aarch64_gpr(uc->cpu, gpr_index, &gpr_value)) {
+        error_setg(errp,
+                   "Instruction-marker filters require an AArch64 CPU backend");
+        return false;
+    }
+    if (gpr_index >= 31) {
+        error_setg(errp, "AArch64 instruction-marker filter register is invalid");
+        return false;
+    }
+    if (!mask || (expected & ~mask)) {
+        error_setg(errp, "AArch64 instruction-marker filter mask is invalid");
+        return false;
+    }
+
+    filter = hedgehog_backend_find_instruction_marker_aarch64_gpr_filter(
+        uc, marker);
+    if (filter) {
+        *filter = new_filter;
+    } else {
+        g_array_append_val(uc->instruction_marker_aarch64_gpr_filters,
+                           new_filter);
+    }
+    hedgehog_exec_hook_set_instruction_marker_filter(
+        uc, hedgehog_backend_instruction_marker_filtered_out, NULL);
+    return true;
+}
+
+static void hedgehog_backend_clear_write_watchpoint_locked(
+    HedgehogBackend *uc)
+{
+    if (!uc) {
+        return;
+    }
+    if (uc->cpu && uc->write_watchpoint) {
+        if (uc->cpu->watchpoint_hit == uc->write_watchpoint) {
+            uc->cpu->watchpoint_hit = NULL;
+        }
+        cpu_watchpoint_remove_by_ref(uc->cpu, uc->write_watchpoint);
+    }
+    uc->write_watchpoint = NULL;
+    uc->write_watchpoint_hook = NULL;
+    uc->write_watchpoint_opaque = NULL;
+    uc->write_watchpoint_hit = false;
+    uc->write_watchpoint_address = 0;
+}
+
+bool hedgehog_backend_set_write_watchpoint(
+    HedgehogBackend *uc, vaddr address, vaddr length,
+    HedgehogExecHookFunc hook_fn, void *opaque, Error **errp)
+{
+    CPUWatchpoint *watchpoint;
+
+    BQL_LOCK_GUARD();
+
+    if (!uc || uc->board_backed || uc->execution_started) {
+        error_setg(errp,
+                   "Write watchpoints require a fresh standalone backend");
+        return false;
+    }
+    if (length && !hook_fn) {
+        error_setg(errp, "Write watchpoints require a callback");
+        return false;
+    }
+
+    hedgehog_backend_clear_write_watchpoint_locked(uc);
+    if (!length) {
+        return true;
+    }
+    if (cpu_watchpoint_insert(uc->cpu, address, length,
+                              BP_GDB | BP_HEDGEHOG_MARKER | BP_MEM_WRITE,
+                              &watchpoint)) {
+        error_setg(errp, "failed to install write watchpoint");
+        return false;
+    }
+    uc->write_watchpoint = watchpoint;
+    uc->write_watchpoint_hook = hook_fn;
+    uc->write_watchpoint_opaque = opaque;
+    return true;
+}
+
+bool hedgehog_backend_get_last_write_watchpoint_address(
+    HedgehogBackend *uc, vaddr *address)
+{
+    BQL_LOCK_GUARD();
+
+    if (!uc || !address || !uc->write_watchpoint_hit) {
+        return false;
+    }
+    *address = uc->write_watchpoint_address;
+    return true;
+}
+
 void hedgehog_backend_set_invalid_insn_hook(
     HedgehogBackend *uc,
     HedgehogInvalidInsnHookFunc hook_fn,
@@ -2361,6 +2780,100 @@ vaddr hedgehog_backend_get_pc(HedgehogBackend *uc)
     return uc->cpu->cc->get_pc(uc->cpu);
 }
 
+/*
+ * The normal direct runner observes a marker through QEMU's exact-PC
+ * breakpoint path.  Bounded runs deliberately enable QEMU single-step, which
+ * suppresses breakpoints, so they ask here before executing their next guest
+ * instruction instead.  In both cases the host callback runs after
+ * cpu_exec_end(), never from translated guest code or while BQL is held.
+ */
+static bool hedgehog_backend_dispatch_instruction_marker(HedgehogBackend *uc,
+                                                          bool resume_guest)
+{
+    vaddr pc;
+    bool stop;
+
+    if (!uc || !uc->instruction_marker_hook) {
+        return false;
+    }
+    pc = hedgehog_backend_get_pc(uc);
+    if (!hedgehog_backend_has_instruction_marker(uc, pc)) {
+        return false;
+    }
+
+    if (!hedgehog_backend_instruction_marker_filter_matches(uc, uc->cpu, pc)) {
+        if (resume_guest) {
+            /* Pass this exact marker without changing guest state. */
+            hedgehog_exec_hook_resume_instruction_marker(uc->cpu, pc);
+            return true;
+        }
+        return false;
+    }
+
+    stop = uc->instruction_marker_hook(uc, pc, uc->instruction_marker_opaque);
+    if (stop) {
+        /*
+         * The exact-PC observer is a host breakpoint, not a guest debug
+         * exception.  cpu_exec() has already reported EXCP_DEBUG by the time
+         * this callback runs.  Consume that synthetic stop now: retaining it
+         * makes a later finite debugger step return immediately at the same
+         * PC without retiring an instruction.
+         */
+        uc->cpu->exception_index = -1;
+        qatomic_set(&uc->stop_requested, true);
+        cpu_exit(uc->cpu);
+    } else if (resume_guest) {
+        /* Let the following cpu_exec pass this marker exactly once. */
+        hedgehog_exec_hook_resume_instruction_marker(uc->cpu, pc);
+    }
+    return true;
+}
+
+static bool hedgehog_backend_instruction_marker_filtered_out(
+    HedgehogBackend *uc, CPUState *cpu, vaddr pc, void *opaque)
+{
+    (void)opaque;
+    return !hedgehog_backend_instruction_marker_filter_matches(uc, cpu, pc);
+}
+
+static bool hedgehog_backend_dispatch_write_watchpoint(HedgehogBackend *uc)
+{
+    CPUWatchpoint *watchpoint;
+    vaddr pc;
+    bool stop;
+
+    if (!uc || !uc->cpu || !uc->write_watchpoint_hook) {
+        return false;
+    }
+    watchpoint = uc->cpu->watchpoint_hit;
+    if (watchpoint != uc->write_watchpoint ||
+        !(watchpoint->flags & BP_WATCHPOINT_HIT_WRITE)) {
+        return false;
+    }
+
+    /* BP_GDB deliberately keeps the debug stop out of guest exception state. */
+    uc->write_watchpoint_address = watchpoint->hitaddr;
+    uc->write_watchpoint_hit = true;
+    watchpoint->flags &= ~BP_WATCHPOINT_HIT;
+    uc->cpu->watchpoint_hit = NULL;
+    /*
+     * Single-step may report the retired instruction before QEMU consumes
+     * the watchpoint's queued host debug interrupt. Consume that synthetic
+     * interrupt too, so the next finite step executes an instruction.
+     */
+    bql_lock();
+    cpu_reset_interrupt(uc->cpu, CPU_INTERRUPT_DEBUG);
+    bql_unlock();
+    pc = hedgehog_backend_get_pc(uc);
+    stop = uc->write_watchpoint_hook(uc, pc,
+                                     uc->write_watchpoint_opaque);
+    if (stop) {
+        qatomic_set(&uc->stop_requested, true);
+        cpu_exit(uc->cpu);
+    }
+    return true;
+}
+
 static HedgehogRunResult hedgehog_backend_translate_run_result(int cpu_exit)
 {
     switch (cpu_exit) {
@@ -2413,6 +2926,13 @@ HedgehogRunResult hedgehog_backend_run(HedgehogBackend *uc,
             ret = cpu_exec(uc->cpu);
             cpu_exec_end(uc->cpu);
             hedgehog_backend_process_queued_cpu_work(uc->cpu);
+            if (ret == EXCP_DEBUG &&
+                (hedgehog_backend_dispatch_write_watchpoint(uc) ||
+                 hedgehog_backend_dispatch_instruction_marker(uc, true))) {
+                /* The marker callback chose whether to stop; otherwise run
+                 * the unchanged instruction on the next direct-run pass. */
+                ret = EXCP_INTERRUPT;
+            }
             hedgehog_backend_dispatch_cpu_outputs(uc);
             hedgehog_backend_dispatch_system_call_events(uc);
             hedgehog_backend_dispatch_cpu_wait_events(uc);
@@ -2458,11 +2978,22 @@ HedgehogRunResult hedgehog_backend_run(HedgehogBackend *uc,
      */
     hedgehog_backend_begin_direct_run(uc);
     cpu_single_step(uc->cpu, SSTEP_ENABLE | SSTEP_NOIRQ);
-    for (i = 0; i < max_instructions; i++) {
+    for (i = 0; i < max_instructions;) {
+        if (hedgehog_backend_dispatch_instruction_marker(uc, false) &&
+            qatomic_read(&uc->stop_requested)) {
+            ret = EXCP_INTERRUPT;
+            break;
+        }
         cpu_exec_start(uc->cpu);
         ret = cpu_exec(uc->cpu);
         cpu_exec_end(uc->cpu);
         hedgehog_backend_process_queued_cpu_work(uc->cpu);
+        if (ret == EXCP_DEBUG &&
+            hedgehog_backend_dispatch_write_watchpoint(uc)) {
+            /* This observer fires after the watched instruction retired. */
+            i++;
+            ret = EXCP_INTERRUPT;
+        }
         hedgehog_backend_dispatch_cpu_outputs(uc);
         hedgehog_backend_dispatch_system_call_events(uc);
         hedgehog_backend_dispatch_cpu_wait_events(uc);
@@ -2474,6 +3005,7 @@ HedgehogRunResult hedgehog_backend_run(HedgehogBackend *uc,
         if (ret == EXCP_ATOMIC && !qatomic_read(&uc->stop_requested) &&
             !uc->invalid_mem_seen) {
             cpu_exec_step_atomic(uc->cpu);
+            i++;
             continue;
         }
 
@@ -2490,6 +3022,7 @@ HedgehogRunResult hedgehog_backend_run(HedgehogBackend *uc,
         if (qatomic_read(&uc->stop_requested) || ret != EXCP_DEBUG) {
             break;
         }
+        i++;
     }
     cpu_single_step(uc->cpu, 0);
     hedgehog_backend_end_direct_run(uc);
@@ -2682,11 +3215,30 @@ bool hedgehog_backend_arm_diagnostics(HedgehogBackend *uc,
                                       HedgehogArmDiagnostics *diagnostics,
                                       Error **errp)
 {
+    HedgehogArmDiagnosticsV2 extended;
+
+    if (!diagnostics) {
+        error_setg(errp, "diagnostics buffer is not initialized");
+        return false;
+    }
+    if (!hedgehog_backend_arm_diagnostics_v2(
+            uc, &extended, sizeof(extended), errp)) {
+        return false;
+    }
+    *diagnostics = extended.base;
+    return true;
+}
+
+bool hedgehog_backend_arm_diagnostics_v2(
+    HedgehogBackend *uc, HedgehogArmDiagnosticsV2 *diagnostics,
+    size_t diagnostics_size, Error **errp)
+{
     const HedgehogArchOps *ops = hedgehog_arch_ops();
 
-    if (!uc || !uc->cpu || !diagnostics) {
+    if (!uc || !uc->cpu || !diagnostics ||
+        diagnostics_size < sizeof(*diagnostics)) {
         error_setg(errp,
-                   "backend, CPU, or diagnostics buffer is not initialized");
+                   "backend, CPU, or extended diagnostics buffer is invalid");
         return false;
     }
     if (!ops || !ops->arm_diagnostics) {
@@ -2716,12 +3268,37 @@ bool hedgehog_backend_restore_arm_generic_timers(
     }
 
     BQL_LOCK_GUARD();
-    if (qatomic_read(&uc->cpu->running)) {
+    if (qatomic_read(&uc->cpu->running) ||
+        hedgehog_exec_hook_direct_run_active(uc->cpu)) {
         error_setg(errp,
                    "generic-timer restore requires a stopped standalone backend");
         return false;
     }
     return ops->restore_arm_generic_timers(uc->cpu, state, errp);
+}
+
+bool hedgehog_backend_restore_arm_execution_state(
+    HedgehogBackend *uc, const HedgehogArmExecutionState *state,
+    Error **errp)
+{
+    const HedgehogArchOps *ops = hedgehog_arch_ops();
+
+    if (!uc || !uc->cpu || !state || uc->board_backed) {
+        error_setg(errp, "execution-state restore requires a stopped standalone backend");
+        return false;
+    }
+    if (!ops || !ops->restore_arm_execution_state) {
+        error_setg(errp, "ARM execution-state restore is unavailable");
+        return false;
+    }
+
+    BQL_LOCK_GUARD();
+    if (qatomic_read(&uc->cpu->running) ||
+        hedgehog_exec_hook_direct_run_active(uc->cpu)) {
+        error_setg(errp, "execution-state restore requires a stopped standalone backend");
+        return false;
+    }
+    return ops->restore_arm_execution_state(uc->cpu, state, errp);
 }
 
 CPUState *hedgehog_backend_cpu(HedgehogBackend *uc)

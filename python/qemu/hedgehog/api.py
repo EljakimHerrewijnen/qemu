@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Set, Tuple, Union
 
 from .backend import BackendProtocol, InvalidMemoryDiagnostic, NativeBackend
 from .constants import (
@@ -687,6 +687,85 @@ class Hedgehog:
         """
         return self._backend.run(max_instructions)
 
+    def qemu_connect_instruction_markers(
+        self,
+        addresses: Iterable[int],
+        callback: Callable[[int], bool],
+    ) -> None:
+        """Observe fixed instruction PCs without enabling a global code hook.
+
+        This standalone, setup-time facility leaves guest memory and control
+        flow untouched. The callback runs at the exact instruction boundary
+        on the direct-run caller, outside QEMU's BQL, and returns whether the
+        run should stop.
+        """
+        if not callable(callback):
+            raise HedgehogError(HEDGEHOG_ERR_ARG, 'instruction marker callback must be callable')
+        markers = tuple(sorted({int(address) for address in addresses}))
+        if not markers:
+            raise HedgehogError(HEDGEHOG_ERR_ARG, 'at least one instruction marker is required')
+        if any(address < 0 for address in markers):
+            raise HedgehogError(HEDGEHOG_ERR_ARG, 'instruction marker address must be non-negative')
+        if not self._backend.set_instruction_markers(markers, callback):
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                'native backend does not support setup-time instruction markers',
+            )
+
+    def qemu_set_instruction_marker_aarch64_gpr_filter(
+        self,
+        address: int,
+        gpr_index: int,
+        mask: int,
+        expected: int,
+    ) -> None:
+        """Restrict an installed marker callback to an AArch64 GPR match.
+
+        Mismatched guest states continue entirely in the native backend.  The
+        observation does not alter guest registers, memory, or control flow.
+        Each installed marker retains its own filter; calling this again for
+        the same marker replaces only that marker's filter.
+        """
+        values = (int(address), int(gpr_index), int(mask), int(expected))
+        if values[0] < 0 or not 0 <= values[1] < 31:
+            raise HedgehogError(HEDGEHOG_ERR_ARG, 'invalid AArch64 marker filter register')
+        if any(value < 0 or value > ((1 << 64) - 1) for value in (values[2], values[3])):
+            raise HedgehogError(HEDGEHOG_ERR_ARG, 'AArch64 marker filter value is outside uint64')
+        if not values[2] or values[3] & ~values[2]:
+            raise HedgehogError(HEDGEHOG_ERR_ARG, 'invalid AArch64 marker filter mask')
+        if not self._backend.set_instruction_marker_aarch64_gpr_filter(*values):
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                'native backend does not support this instruction-marker filter',
+            )
+
+    def qemu_connect_write_watchpoint(
+        self,
+        address: int,
+        length: int,
+        callback: Callable[[int], bool],
+    ) -> None:
+        """Observe writes to one fixed virtual range without remapping RAM.
+
+        The callback runs outside QEMU's BQL at the post-access debug
+        boundary and receives the architectural PC from that boundary. It
+        returns ``True`` only to stop the run. Configure the observer before
+        execution begins.
+        """
+        if not callable(callback):
+            raise HedgehogError(HEDGEHOG_ERR_ARG, 'write watchpoint callback must be callable')
+        if address < 0 or length <= 0:
+            raise HedgehogError(HEDGEHOG_ERR_ARG, 'write watchpoint requires a non-empty range')
+        if not self._backend.set_write_watchpoint(int(address), int(length), callback):
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                'native backend does not support setup-time write watchpoints',
+            )
+
+    def qemu_last_write_watchpoint_address(self) -> Optional[int]:
+        """Return the address that triggered the latest configured write watchpoint."""
+        return self._backend.get_last_write_watchpoint_address()
+
     def qemu_reset_stop(self) -> None:
         """Clear prior stop state before arming a new asynchronous run."""
         self._backend.reset_stop()
@@ -888,6 +967,22 @@ class Hedgehog:
         """Read ARM CPU diagnostic state from the native QEMU backend."""
         return dict(self._backend.arm_diagnostics())
 
+    def qemu_set_dirty_ram_tracking(self, enabled: bool = True) -> None:
+        """Configure optional standalone RAM write logging before execution."""
+        if not self._backend.set_dirty_ram_tracking(bool(enabled)):
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                'failed to configure native dirty-RAM tracking',
+            )
+
+    def qemu_collect_dirty_ram_pages(
+        self, *, nonzero_only: bool = False, clear: bool = True,
+    ) -> Tuple[int, ...]:
+        """Collect stopped native RAM writes, optionally filtering zero pages."""
+        return tuple(self._backend.collect_dirty_ram_pages(
+            nonzero_only=nonzero_only, clear=clear,
+        ))
+
     def qemu_restore_arm_generic_timers(
         self,
         *,
@@ -902,6 +997,14 @@ class Hedgehog:
             raise HedgehogError(
                 HEDGEHOG_ERR_RESOURCE,
                 'failed to restore AArch64 generic-timer state',
+            )
+
+    def qemu_restore_arm_execution_state(self, state: Mapping[str, int]) -> None:
+        """Restore captured AArch64 translation/system state before running."""
+        if not self._backend.restore_arm_execution_state(state):
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                'failed to restore AArch64 execution state',
             )
 
     def qemu_set_invalid_memory_diagnostic_capture(self, enabled: bool = True) -> None:

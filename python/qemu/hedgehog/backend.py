@@ -19,7 +19,7 @@ import glob
 import os
 import threading
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple, cast
+from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Tuple, cast
 from typing import runtime_checkable
 
 from .constants import HEDGEHOG_ERR_ARG, HEDGEHOG_ERR_RESOURCE
@@ -247,11 +247,42 @@ class _ArmDiagnostics(ctypes.Structure):
     ]
 
 
+class _ArmDiagnosticsV2(_ArmDiagnostics):
+    _fields_ = [
+        ('ttbr0_el1', ctypes.c_uint64),
+        ('ttbr1_el1', ctypes.c_uint64),
+        ('tcr_el1', ctypes.c_uint64),
+        ('sctlr_el1', ctypes.c_uint64),
+        ('tpidr_el1', ctypes.c_uint64),
+        ('vbar_el1', ctypes.c_uint64),
+        ('ttbr0_el2', ctypes.c_uint64),
+        ('tcr_el2', ctypes.c_uint64),
+        ('sctlr_el2', ctypes.c_uint64),
+        ('vttbr_el2', ctypes.c_uint64),
+        ('vtcr_el2', ctypes.c_uint64),
+        ('vbar_el2', ctypes.c_uint64),
+    ]
+
+
 class _ArmGenericTimerState(ctypes.Structure):
     _fields_ = [
         ('virtual_clock_ns', ctypes.c_int64),
         ('generic_timer_cval', ctypes.c_uint64 * 7),
         ('generic_timer_ctl', ctypes.c_uint64 * 7),
+    ]
+
+
+class _ArmExecutionState(ctypes.Structure):
+    _fields_ = [
+        (name, ctypes.c_uint64)
+        for name in (
+            'ttbr0_el1', 'ttbr1_el1', 'tcr_el1', 'sctlr_el1', 'scr_el3',
+            'hcr_el2', 'elr_el1', 'elr_el2', 'elr_el3', 'spsr_el1',
+            'spsr_el2', 'spsr_el3', 'esr_el1', 'esr_el2', 'esr_el3',
+            'far_el1', 'far_el2', 'far_el3', 'tpidr_el1', 'vbar_el1',
+            'ttbr0_el2', 'tcr_el2', 'sctlr_el2', 'vttbr_el2', 'vtcr_el2',
+            'vbar_el2',
+        )
     ]
 
 
@@ -310,6 +341,37 @@ class BackendProtocol(Protocol):
 
     def set_insn_hook(self, callback: Optional[ExecHookCallback]) -> None:
         """Set or clear instruction callback."""
+        ...
+
+    def set_instruction_markers(
+        self,
+        addresses: Tuple[int, ...],
+        callback: Optional[ExecHookCallback],
+    ) -> bool:
+        """Install setup-time exact-PC observers without global stepping."""
+        ...
+
+    def set_instruction_marker_aarch64_gpr_filter(
+        self,
+        address: int,
+        gpr_index: int,
+        mask: int,
+        expected: int,
+    ) -> bool:
+        """Filter an installed marker using a native AArch64 GPR match."""
+        ...
+
+    def set_write_watchpoint(
+        self,
+        address: int,
+        length: int,
+        callback: Optional[ExecHookCallback],
+    ) -> bool:
+        """Install one setup-time virtual-memory write observer."""
+        ...
+
+    def get_last_write_watchpoint_address(self) -> Optional[int]:
+        """Return the exact address of the most recent write-watchpoint hit."""
         ...
 
     def set_invalid_insn_hook(
@@ -465,6 +527,20 @@ class BackendProtocol(Protocol):
         """Restore the stopped native AArch64 generic-timer state."""
         ...
 
+    def restore_arm_execution_state(self, state: Mapping[str, int]) -> bool:
+        """Restore captured AArch64 EL1/EL2/EL3 translation state."""
+        ...
+
+    def set_dirty_ram_tracking(self, enabled: bool) -> bool:
+        """Configure optional native RAM write logging before execution."""
+        ...
+
+    def collect_dirty_ram_pages(
+        self, *, nonzero_only: bool = False, clear: bool = True,
+    ) -> Tuple[int, ...]:
+        """Collect dirty pages of stopped native guest execution."""
+        ...
+
 
 class NativeBackend:
     """
@@ -482,6 +558,8 @@ class NativeBackend:
 
         self._tb_hook_bridge: Optional[object] = None
         self._insn_hook_bridge: Optional[object] = None
+        self._instruction_marker_hook_bridge: Optional[object] = None
+        self._write_watchpoint_hook_bridge: Optional[object] = None
         self._invalid_insn_hook_bridge: Optional[object] = None
         self._invalid_hook_bridge: Optional[object] = None
         self._mmio_bridges: List[Tuple[object, object]] = []
@@ -664,6 +742,9 @@ class NativeBackend:
         self._lib.hedgehog_backend_set_invalid_mem_hook(self._handle, None, None)
         self._tb_hook_bridge = None
         self._insn_hook_bridge = None
+        # Instruction markers are setup-only. A live native backend may still
+        # hold their C callback pointer, so retain this bridge until process
+        # exit instead of leaving a dangling ctypes callback behind.
         self._invalid_insn_hook_bridge = None
         self._invalid_hook_bridge = None
         self._mmio_bridges.clear()
@@ -844,6 +925,109 @@ class NativeBackend:
             _callback_pointer(self._insn_hook_bridge),
             None,
         )
+
+    def set_instruction_markers(
+        self,
+        addresses: Tuple[int, ...],
+        callback: Optional[ExecHookCallback],
+    ) -> bool:
+        """Install fixed exact-PC callbacks before native execution starts."""
+        self._ensure_open()
+        if not hasattr(self._lib, 'hedgehog_backend_set_instruction_markers'):
+            return False
+
+        markers = tuple(sorted({int(address) for address in addresses}))
+        if any(address < 0 or address >= 1 << 64 for address in markers):
+            raise HedgehogError(HEDGEHOG_ERR_ARG, 'instruction marker address is outside uint64')
+        if markers and callback is None:
+            raise HedgehogError(HEDGEHOG_ERR_ARG, 'instruction markers require a callback')
+
+        marker_array = (ctypes.c_uint64 * len(markers))(*markers) if markers else None
+        bridge = _maybe_wrap_exec_hook(callback)
+        ok, _detail = _call_bool_with_error(
+            self._lib,
+            self._lib.hedgehog_backend_set_instruction_markers,
+            self._handle,
+            marker_array,
+            ctypes.c_size_t(len(markers)),
+            _callback_pointer(bridge),
+            None,
+        )
+        if ok:
+            self._instruction_marker_hook_bridge = bridge
+        return ok
+
+    def set_instruction_marker_aarch64_gpr_filter(
+        self,
+        address: int,
+        gpr_index: int,
+        mask: int,
+        expected: int,
+    ) -> bool:
+        """Configure a native mask filter for an installed instruction marker."""
+        self._ensure_open()
+        if not hasattr(
+            self._lib,
+            'hedgehog_backend_set_instruction_marker_aarch64_gpr_filter',
+        ):
+            return False
+        values = (int(address), int(gpr_index), int(mask), int(expected))
+        if not 0 <= values[0] < 1 << 64 or not 0 <= values[1] < 31:
+            raise HedgehogError(HEDGEHOG_ERR_ARG, 'invalid AArch64 marker filter register')
+        if any(value < 0 or value > ((1 << 64) - 1) for value in (values[2], values[3])):
+            raise HedgehogError(HEDGEHOG_ERR_ARG, 'AArch64 marker filter value is outside uint64')
+        if not values[2] or values[3] & ~values[2]:
+            raise HedgehogError(HEDGEHOG_ERR_ARG, 'invalid AArch64 marker filter mask')
+        ok, _detail = _call_bool_with_error(
+            self._lib,
+            self._lib.hedgehog_backend_set_instruction_marker_aarch64_gpr_filter,
+            self._handle,
+            ctypes.c_uint64(values[0]),
+            ctypes.c_uint(values[1]),
+            ctypes.c_uint64(values[2]),
+            ctypes.c_uint64(values[3]),
+        )
+        return ok
+
+    def set_write_watchpoint(
+        self,
+        address: int,
+        length: int,
+        callback: Optional[ExecHookCallback],
+    ) -> bool:
+        """Install one post-write virtual-memory observer before execution."""
+        self._ensure_open()
+        if not hasattr(self._lib, 'hedgehog_backend_set_write_watchpoint'):
+            return False
+        if not 0 <= address < 1 << 64 or not 0 <= length < 1 << 64 or address + length > 1 << 64:
+            raise HedgehogError(HEDGEHOG_ERR_ARG, 'write watchpoint range is outside uint64')
+        if length and callback is None:
+            raise HedgehogError(HEDGEHOG_ERR_ARG, 'write watchpoint requires a callback')
+
+        bridge = _maybe_wrap_exec_hook(callback)
+        ok, _detail = _call_bool_with_error(
+            self._lib,
+            self._lib.hedgehog_backend_set_write_watchpoint,
+            self._handle,
+            ctypes.c_uint64(address),
+            ctypes.c_uint64(length),
+            _callback_pointer(bridge),
+            None,
+        )
+        if ok:
+            self._write_watchpoint_hook_bridge = bridge
+        return ok
+
+    def get_last_write_watchpoint_address(self) -> Optional[int]:
+        self._ensure_open()
+        if not hasattr(self._lib, 'hedgehog_backend_get_last_write_watchpoint_address'):
+            return None
+        address = ctypes.c_uint64()
+        if not self._lib.hedgehog_backend_get_last_write_watchpoint_address(
+            self._handle, ctypes.byref(address)
+        ):
+            return None
+        return int(address.value)
 
     def set_invalid_insn_hook(
         self,
@@ -1236,16 +1420,26 @@ class NativeBackend:
         self._ensure_open()
         if not hasattr(self._lib, 'hedgehog_backend_arm_diagnostics'):
             return {}
-        diagnostics = _ArmDiagnostics()
-        ok, detail = _call_bool_with_error(
-            self._lib,
-            self._lib.hedgehog_backend_arm_diagnostics,
-            self._handle,
-            ctypes.byref(diagnostics),
-        )
+        diagnostics = _ArmDiagnosticsV2()
+        has_extended = hasattr(self._lib, 'hedgehog_backend_arm_diagnostics_v2')
+        if has_extended:
+            ok, _detail = _call_bool_with_error(
+                self._lib,
+                self._lib.hedgehog_backend_arm_diagnostics_v2,
+                self._handle,
+                ctypes.byref(diagnostics),
+                ctypes.c_size_t(ctypes.sizeof(diagnostics)),
+            )
+        else:
+            ok, _detail = _call_bool_with_error(
+                self._lib,
+                self._lib.hedgehog_backend_arm_diagnostics,
+                self._handle,
+                ctypes.cast(ctypes.byref(diagnostics), ctypes.POINTER(_ArmDiagnostics)),
+            )
         if not ok:
             return {}
-        return {
+        result: Dict[str, object] = {
             'pc': int(diagnostics.pc),
             'pstate': int(diagnostics.pstate),
             'scr_el3': int(diagnostics.scr_el3),
@@ -1280,6 +1474,12 @@ class NativeBackend:
             'generic_timer_imask': [int(value) for value in diagnostics.generic_timer_imask],
             'generic_timer_istatus': [int(value) for value in diagnostics.generic_timer_istatus],
         }
+        if has_extended:
+            result.update({
+                name: int(getattr(diagnostics, name))
+                for name, _ctype in _ArmDiagnosticsV2._fields_
+            })
+        return result
 
     def restore_arm_generic_timers(
         self,
@@ -1308,6 +1508,108 @@ class NativeBackend:
             ctypes.byref(state),
         )
         return ok
+
+    def restore_arm_execution_state(self, state: Mapping[str, int]) -> bool:
+        """Restore the fixed architectural fields exposed by diagnostics."""
+        self._ensure_open()
+        if not hasattr(self._lib, 'hedgehog_backend_restore_arm_execution_state'):
+            return False
+        restored = _ArmExecutionState()
+        for name, _ctype in restored._fields_:
+            value = state.get(name)
+            if (isinstance(value, bool) or not isinstance(value, int) or
+                    not 0 <= value < 1 << 64):
+                raise ValueError(f'AArch64 execution-state field {name} is invalid')
+            setattr(restored, name, value)
+        ok, _detail = _call_bool_with_error(
+            self._lib,
+            self._lib.hedgehog_backend_restore_arm_execution_state,
+            self._handle,
+            ctypes.byref(restored),
+        )
+        return ok
+
+    def set_dirty_ram_tracking(self, enabled: bool) -> bool:
+        self._ensure_open()
+        configure = getattr(self._lib, 'hedgehog_backend_set_dirty_ram_tracking', None)
+        if configure is None:
+            return False
+        ok, _detail = _call_bool_with_error(
+            self._lib, configure, self._handle, ctypes.c_bool(enabled),
+        )
+        return ok
+
+    def collect_dirty_ram_pages(
+        self, *, nonzero_only: bool = False, clear: bool = True,
+    ) -> Tuple[int, ...]:
+        """Collect the standalone backend's optional native RAM dirty log.
+
+        QEMU's TCG stores are not visible to the Python ``mem_write`` API.
+        The two-pass ABI avoids a guessed capacity while keeping the sizing
+        pass non-mutating, so a successful result advances the native
+        dirty-log epoch exactly once.
+        """
+        self._ensure_open()
+        collect = getattr(self._lib, 'hedgehog_backend_collect_dirty_ram_pages', None)
+        if collect is None:
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                'native backend does not expose dirty-RAM snapshot capture',
+            )
+        count = ctypes.c_size_t()
+        ok, detail = _call_bool_with_error(
+            self._lib,
+            collect,
+            self._handle,
+            None,
+            ctypes.c_size_t(0),
+            ctypes.byref(count),
+            ctypes.c_bool(nonzero_only),
+            ctypes.c_bool(False),
+        )
+        if not ok:
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                f'failed to size native dirty-RAM snapshot: {detail}',
+            )
+        if count.value == 0:
+            # Clear zero-filled TCG writes too.  They carry no checkpoint
+            # payload, but leaving their bitmap set would fold an unbounded
+            # history into the next snapshot.
+            ok, detail = _call_bool_with_error(
+                self._lib,
+                collect,
+                self._handle,
+                None,
+                ctypes.c_size_t(0),
+                ctypes.byref(count),
+                ctypes.c_bool(nonzero_only),
+                ctypes.c_bool(clear),
+            )
+            if not ok or count.value:
+                raise HedgehogError(
+                    HEDGEHOG_ERR_RESOURCE,
+                    f'failed to clear native dirty-RAM snapshot: {detail}',
+                )
+            return ()
+        output = (ctypes.c_uint64 * count.value)()
+        actual = ctypes.c_size_t()
+        ok, detail = _call_bool_with_error(
+            self._lib,
+            collect,
+            self._handle,
+            output,
+            ctypes.c_size_t(count.value),
+            ctypes.byref(actual),
+            ctypes.c_bool(nonzero_only),
+            ctypes.c_bool(clear),
+        )
+        if not ok or actual.value != count.value:
+            raise HedgehogError(
+                HEDGEHOG_ERR_RESOURCE,
+                f'failed to collect native dirty-RAM snapshot: {detail}',
+            )
+        return tuple(int(output[index]) for index in range(actual.value))
 
     def __del__(self) -> None:
         try:
@@ -1535,6 +1837,24 @@ def _configure_library_api(lib: ctypes.CDLL) -> None:
         lib.hedgehog_backend_virtual_clock_ns.argtypes = []
         lib.hedgehog_backend_virtual_clock_ns.restype = ctypes.c_int64
 
+    if hasattr(lib, 'hedgehog_backend_set_dirty_ram_tracking'):
+        lib.hedgehog_backend_set_dirty_ram_tracking.argtypes = [
+            ctypes.c_void_p, ctypes.c_bool, error_ptr_t,
+        ]
+        lib.hedgehog_backend_set_dirty_ram_tracking.restype = ctypes.c_bool
+
+    if hasattr(lib, 'hedgehog_backend_collect_dirty_ram_pages'):
+        lib.hedgehog_backend_collect_dirty_ram_pages.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint64),
+            ctypes.c_size_t,
+            ctypes.POINTER(ctypes.c_size_t),
+            ctypes.c_bool,
+            ctypes.c_bool,
+            error_ptr_t,
+        ]
+        lib.hedgehog_backend_collect_dirty_ram_pages.restype = ctypes.c_bool
+
     if hasattr(lib, 'hedgehog_backend_new_with_machine'):
         lib.hedgehog_backend_new_with_machine.argtypes = [
             ctypes.c_char_p,
@@ -1632,6 +1952,46 @@ def _configure_library_api(lib: ctypes.CDLL) -> None:
         ctypes.c_void_p,
     ]
     lib.hedgehog_backend_set_insn_hook.restype = None
+
+    if hasattr(lib, 'hedgehog_backend_set_instruction_markers'):
+        lib.hedgehog_backend_set_instruction_markers.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint64),
+            ctypes.c_size_t,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            error_ptr_t,
+        ]
+        lib.hedgehog_backend_set_instruction_markers.restype = ctypes.c_bool
+
+    if hasattr(lib, 'hedgehog_backend_set_instruction_marker_aarch64_gpr_filter'):
+        lib.hedgehog_backend_set_instruction_marker_aarch64_gpr_filter.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint64,
+            ctypes.c_uint,
+            ctypes.c_uint64,
+            ctypes.c_uint64,
+            error_ptr_t,
+        ]
+        lib.hedgehog_backend_set_instruction_marker_aarch64_gpr_filter.restype = ctypes.c_bool
+
+    if hasattr(lib, 'hedgehog_backend_set_write_watchpoint'):
+        lib.hedgehog_backend_set_write_watchpoint.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint64,
+            ctypes.c_uint64,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            error_ptr_t,
+        ]
+        lib.hedgehog_backend_set_write_watchpoint.restype = ctypes.c_bool
+
+    if hasattr(lib, 'hedgehog_backend_get_last_write_watchpoint_address'):
+        lib.hedgehog_backend_get_last_write_watchpoint_address.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint64),
+        ]
+        lib.hedgehog_backend_get_last_write_watchpoint_address.restype = ctypes.c_bool
 
     lib.hedgehog_backend_set_invalid_insn_hook.argtypes = [
         ctypes.c_void_p,
@@ -1745,6 +2105,23 @@ def _configure_library_api(lib: ctypes.CDLL) -> None:
             error_ptr_t,
         ]
         lib.hedgehog_backend_restore_arm_generic_timers.restype = ctypes.c_bool
+
+    if hasattr(lib, 'hedgehog_backend_arm_diagnostics_v2'):
+        lib.hedgehog_backend_arm_diagnostics_v2.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(_ArmDiagnosticsV2),
+            ctypes.c_size_t,
+            error_ptr_t,
+        ]
+        lib.hedgehog_backend_arm_diagnostics_v2.restype = ctypes.c_bool
+
+    if hasattr(lib, 'hedgehog_backend_restore_arm_execution_state'):
+        lib.hedgehog_backend_restore_arm_execution_state.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(_ArmExecutionState),
+            error_ptr_t,
+        ]
+        lib.hedgehog_backend_restore_arm_execution_state.restype = ctypes.c_bool
 
     if hasattr(lib, 'error_get_pretty'):
         lib.error_get_pretty.argtypes = [ctypes.c_void_p]

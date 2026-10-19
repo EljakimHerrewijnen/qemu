@@ -18,6 +18,259 @@ def _backend_library() -> Path:
     return ROOT / 'build' / 'libqemu-hedgehog-backend.so'
 
 
+def _run_native_script(script: str, timeout: int = 15) -> None:
+    backend_library = _backend_library()
+    if not backend_library.exists():
+        pytest.skip(f'Hedgehog backend library not found: {backend_library}')
+    env = os.environ.copy()
+    env['PYTHONPATH'] = str(ROOT / 'python')
+    env['QEMU_HEDGEHOG_BACKEND_LIBRARY'] = str(backend_library)
+    result = subprocess.run(
+        [sys.executable, '-c', script], cwd=ROOT, env=env,
+        text=True, capture_output=True, check=False, timeout=timeout,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize('budget', [0, 8])
+def test_aarch64_instruction_marker_continue_stop_and_finite_resume(budget: int) -> None:
+    _run_native_script('budget = ' + str(budget) + r'''
+import struct
+from qemu.hedgehog import Hedgehog, HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM
+from qemu.hedgehog.constants import (
+    QEMU_HEDGEHOG_RUN_BUDGET_EXHAUSTED, QEMU_HEDGEHOG_RUN_STOP_REQUESTED,
+)
+
+# mov x1,#0; add x1,x1,#1; add x1,x1,#2; b 4
+code = struct.pack('<4I', 0xd2800001, 0x91000421, 0x91000821, 0x17fffffe)
+emu = Hedgehog(HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM, cpu_type='cortex-a55')
+emu.mem_map(0, 0x1000)
+emu.mem_write(0, code)
+seen = []
+def capture(pc):
+    seen.append((pc, emu.reg_read(1, size=8)))
+    return len(seen) == 2
+emu.qemu_connect_instruction_markers((4,), capture)
+assert emu._backend._insn_hook_bridge is None
+assert emu.qemu_run(budget)[0] == QEMU_HEDGEHOG_RUN_STOP_REQUESTED
+assert seen == [(4, 0), (4, 3)]
+assert emu.qemu_get_pc() == 4
+emu.qemu_reset_stop()
+assert emu.qemu_run(1)[0] == QEMU_HEDGEHOG_RUN_BUDGET_EXHAUSTED
+assert emu.qemu_get_pc() == 8
+assert emu.reg_read(1, size=8) == 4
+assert seen == [(4, 0), (4, 3), (4, 3)]
+assert emu.mem_read(0, len(code)) == code
+emu.close()
+''')
+
+
+@pytest.mark.parametrize('budget', [0, 8])
+@pytest.mark.parametrize('stop', [False, True])
+def test_aarch64_write_watchpoint_continue_and_finite_resume(budget: int, stop: bool) -> None:
+    _run_native_script('budget = ' + str(budget) + '\nstop = ' + str(stop) + r'''
+import struct
+from qemu.hedgehog import Hedgehog, HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM
+from qemu.hedgehog.constants import (
+    QEMU_HEDGEHOG_RUN_BUDGET_EXHAUSTED, QEMU_HEDGEHOG_RUN_STOP_REQUESTED,
+)
+
+# mov x0,#0x100; mov w1,#1; str w1,[x0]; add w1,w1,#1; b .
+code = struct.pack('<5I', 0xd2802000, 0x52800021, 0xb9000001, 0x11000421, 0x14000000)
+emu = Hedgehog(HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM, cpu_type='cortex-a55')
+emu.mem_map(0, 0x1000)
+emu.mem_write(0, code)
+seen = []
+def capture(pc):
+    seen.append((pc, emu.qemu_last_write_watchpoint_address()))
+    if not stop:
+        emu.emu_stop()
+    return stop
+emu.qemu_connect_write_watchpoint(0x100, 4, capture)
+assert emu._backend._insn_hook_bridge is None
+assert emu.qemu_run(budget)[0] == QEMU_HEDGEHOG_RUN_STOP_REQUESTED
+assert seen == [(12, 0x100)]
+assert emu.mem_read(0x100, 4) == b'\x01\x00\x00\x00'
+emu.qemu_reset_stop()
+assert emu.qemu_run(1)[0] == QEMU_HEDGEHOG_RUN_BUDGET_EXHAUSTED
+assert emu.qemu_get_pc() == 16
+assert emu.reg_read(1, size=8) == 2
+assert len(seen) == 1
+emu.close()
+''')
+
+
+def test_aarch64_dirty_ram_tracking_is_opt_in_and_collects_complete_epochs() -> None:
+    _run_native_script(r'''
+import ctypes
+import struct
+from qemu.hedgehog import Hedgehog, HedgehogError, HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM
+
+# Store at the first and last word of one snapshot page, then zero another.
+code = struct.pack('<6I', 0xd2820000, 0x52800541, 0xb9000001, 0xb90ffc01, 0xd2840000, 0xb900001f)
+emu = Hedgehog(HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM, cpu_type='cortex-a55')
+emu.mem_map(0, 0x4000)
+emu.mem_write(0, code)
+try:
+    emu.qemu_collect_dirty_ram_pages()
+except HedgehogError:
+    pass
+else:
+    raise AssertionError('disabled dirty-RAM tracking was accepted')
+emu.qemu_set_dirty_ram_tracking()
+emu.qemu_collect_dirty_ram_pages()
+emu.qemu_run(3)
+assert emu.qemu_collect_dirty_ram_pages(clear=False) == (0x1000,)
+assert emu.qemu_collect_dirty_ram_pages() == (0x1000,)
+assert emu.qemu_collect_dirty_ram_pages() == ()
+emu.qemu_run(1)
+native = emu._backend
+pages = (ctypes.c_uint64 * 1)()
+count = ctypes.c_size_t()
+assert not native._lib.hedgehog_backend_collect_dirty_ram_pages(
+    native._handle, pages, 0, ctypes.byref(count), False, True, None,
+)
+assert emu.qemu_collect_dirty_ram_pages() == (0x1000,)
+emu.qemu_run(2)
+assert emu.qemu_collect_dirty_ram_pages(clear=False) == (0x2000,)
+assert emu.qemu_collect_dirty_ram_pages(nonzero_only=True) == ()
+assert emu.qemu_collect_dirty_ram_pages() == ()
+emu.close()
+''')
+
+
+@pytest.mark.parametrize('budget', [0, 8])
+def test_aarch64_write_watchpoint_false_return_continues_to_later_marker(budget: int) -> None:
+    _run_native_script('budget = ' + str(budget) + r'''
+import struct
+from qemu.hedgehog import Hedgehog, HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM
+from qemu.hedgehog.constants import QEMU_HEDGEHOG_RUN_STOP_REQUESTED
+
+# mov x0,#0x100; mov w1,#1; str w1,[x0]; add w1,w1,#1; nop
+emu = Hedgehog(HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM, cpu_type='cortex-a55')
+emu.mem_map(0, 0x1000)
+emu.mem_write(0, struct.pack('<5I', 0xd2802000, 0x52800021, 0xb9000001,
+                             0x11000421, 0xd503201f))
+seen = []
+emu.qemu_connect_write_watchpoint(0x100, 4, lambda pc: seen.append(pc) or False)
+emu.qemu_connect_instruction_markers((16,), lambda _pc: True)
+assert emu.qemu_run(budget)[0] == QEMU_HEDGEHOG_RUN_STOP_REQUESTED
+assert seen == [12]
+assert emu.qemu_get_pc() == 16
+assert emu.reg_read(1, size=8) == 2
+emu.close()
+''')
+
+
+def test_aarch64_write_watchpoint_counts_retired_store_in_finite_budget() -> None:
+    _run_native_script(r'''
+import struct
+from qemu.hedgehog import Hedgehog, HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM
+from qemu.hedgehog.constants import QEMU_HEDGEHOG_RUN_BUDGET_EXHAUSTED
+
+emu = Hedgehog(HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM, cpu_type='cortex-a55')
+emu.mem_map(0, 0x1000)
+emu.mem_write(0, struct.pack('<4I', 0xd2802000, 0x52800021, 0xb9000001, 0x11000421))
+seen = []
+emu.qemu_connect_write_watchpoint(0x100, 4, lambda pc: seen.append(pc) or False)
+assert emu.qemu_run(3)[0] == QEMU_HEDGEHOG_RUN_BUDGET_EXHAUSTED
+assert emu.qemu_get_pc() == 12
+assert emu.reg_read(1, size=8) == 1
+assert seen == [12]
+assert emu.qemu_run(1)[0] == QEMU_HEDGEHOG_RUN_BUDGET_EXHAUSTED
+assert emu.qemu_get_pc() == 16
+assert emu.reg_read(1, size=8) == 2
+emu.close()
+''')
+
+
+def test_aarch64_extended_diagnostics_preserve_legacy_buffer_and_restore_context() -> None:
+    _run_native_script(r'''
+import ctypes
+from qemu.hedgehog import Hedgehog, HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM
+from qemu.hedgehog.backend import _ArmDiagnostics, _ArmDiagnosticsV2, _ArmExecutionState
+
+emu = Hedgehog(HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM, cpu_type='cortex-a55')
+native = emu._backend
+class GuardedLegacy(ctypes.Structure):
+    _fields_ = [('diagnostics', _ArmDiagnostics), ('canary', ctypes.c_uint64)]
+guarded = GuardedLegacy()
+guarded.canary = 0x1122334455667788
+assert native._lib.hedgehog_backend_arm_diagnostics(
+    native._handle, ctypes.byref(guarded.diagnostics), None,
+)
+assert guarded.canary == 0x1122334455667788
+extended = _ArmDiagnosticsV2()
+assert not native._lib.hedgehog_backend_arm_diagnostics_v2(
+    native._handle, ctypes.byref(extended), ctypes.sizeof(_ArmDiagnostics), None,
+)
+before = emu.qemu_arm_diagnostics()
+state = {name: before[name] for name, _ctype in _ArmExecutionState._fields_}
+state.update(tpidr_el1=0x1234, vbar_el1=0x8000)
+emu.qemu_restore_arm_execution_state(state)
+after = emu.qemu_arm_diagnostics()
+assert {name: after[name] for name in state} == state
+emu.mem_map(0, 0x1000)
+emu.mem_write(0, bytes.fromhex('1f2003d5'))  # nop
+emu.qemu_run(1)
+emu.qemu_restore_arm_execution_state(state)
+assert emu.qemu_arm_diagnostics()['tpidr_el1'] == 0x1234
+emu.close()
+''')
+
+
+def test_aarch64_snapshot_primitives_reject_an_active_direct_run() -> None:
+    _run_native_script(r'''
+from qemu.hedgehog import Hedgehog, HedgehogError, HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM
+from qemu.hedgehog.backend import _ArmExecutionState
+
+emu = Hedgehog(HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM, cpu_type='cortex-a55')
+emu.mem_map(0, 0x1000)
+emu.mem_write(0, bytes.fromhex('1f2003d5'))  # nop
+emu.qemu_set_dirty_ram_tracking()
+before = emu.qemu_arm_diagnostics()
+state = {name: before[name] for name, _ctype in _ArmExecutionState._fields_}
+seen = []
+def capture(_pc):
+    for operation in (lambda: emu.qemu_collect_dirty_ram_pages(),
+                      lambda: emu.qemu_restore_arm_execution_state(state),
+                      lambda: emu.qemu_restore_arm_generic_timers(
+                          virtual_clock_ns=0, cvals=(0,) * 7, controls=(0,) * 7)):
+        try:
+            operation()
+        except HedgehogError:
+            seen.append('rejected')
+        else:
+            raise AssertionError('active direct-run snapshot primitive was accepted')
+    return True
+emu.qemu_connect_instruction_markers((0,), capture)
+emu.qemu_run(0)
+assert seen == ['rejected', 'rejected', 'rejected']
+emu.close()
+''')
+
+
+def test_aarch64_snapshot_primitives_reject_board_backed_execution() -> None:
+    _run_native_script(r'''
+from qemu.hedgehog import Hedgehog, HedgehogError, HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM
+from qemu.hedgehog.backend import _ArmExecutionState
+
+emu = Hedgehog(HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM,
+               cpu_type='cortex-a55', machine_type='virt')
+state = {name: 0 for name, _ctype in _ArmExecutionState._fields_}
+for operation in (lambda: emu.qemu_set_dirty_ram_tracking(),
+                  lambda: emu.qemu_collect_dirty_ram_pages(),
+                  lambda: emu.qemu_restore_arm_execution_state(state)):
+    try:
+        operation()
+    except HedgehogError:
+        pass
+    else:
+        raise AssertionError('board-backed snapshot primitive was accepted')
+emu.close()
+''')
+
+
 def test_standalone_virtual_clock_freezes_outside_direct_runs() -> None:
     backend_library = _backend_library()
     if not backend_library.exists():
@@ -121,6 +374,74 @@ assert result == QEMU_HEDGEHOG_RUN_STOP_REQUESTED
 # wait came from 0x1000, the second from the reset vector at 0x0.
 assert seen == [(0x1004, 'wfi', 3), (4, 'wfi', 3)]
 assert reset_seen == [0]
+emu.close()
+'''
+    env = os.environ.copy()
+    env['PYTHONPATH'] = str(ROOT / 'python')
+    env['QEMU_HEDGEHOG_BACKEND_LIBRARY'] = str(backend_library)
+    result = subprocess.run(
+        [sys.executable, '-c', script], cwd=ROOT, env=env,
+        text=True, capture_output=True, check=False, timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_aarch64_write_watchpoint_observes_store_without_remapping_ram() -> None:
+    backend_library = _backend_library()
+    if not backend_library.exists():
+        pytest.skip(f'Hedgehog backend library not found: {backend_library}')
+
+    script = r'''
+from qemu.hedgehog import Hedgehog, HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM
+from qemu.hedgehog.constants import QEMU_HEDGEHOG_RUN_STOP_REQUESTED
+
+# mov x0, #0x100; mov w1, #1; str w1, [x0]; nop
+code = bytes.fromhex('002080d221008052010000b91f2003d5')
+emu = Hedgehog(HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM, cpu_type='cortex-a55')
+emu.mem_map(0, 0x1000)
+emu.mem_write(0, code)
+seen = []
+def capture(pc):
+    seen.append((pc, emu.qemu_last_write_watchpoint_address()))
+    return True
+emu.qemu_connect_write_watchpoint(0x100, 4, capture)
+result, _cpu_exit = emu.qemu_run(8)
+assert result == QEMU_HEDGEHOG_RUN_STOP_REQUESTED
+assert seen == [(0xc, 0x100)]
+assert emu.mem_read(0x100, 4) == b'\x01\x00\x00\x00'
+emu.close()
+'''
+    env = os.environ.copy()
+    env['PYTHONPATH'] = str(ROOT / 'python')
+    env['QEMU_HEDGEHOG_BACKEND_LIBRARY'] = str(backend_library)
+    result = subprocess.run(
+        [sys.executable, '-c', script], cwd=ROOT, env=env,
+        text=True, capture_output=True, check=False, timeout=15,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_aarch64_instruction_marker_gpr_filter_skips_nonmatching_states() -> None:
+    backend_library = _backend_library()
+    if not backend_library.exists():
+        pytest.skip(f'Hedgehog backend library not found: {backend_library}')
+
+    script = r'''
+from qemu.hedgehog import Hedgehog, HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM
+from qemu.hedgehog.constants import QEMU_HEDGEHOG_RUN_STOP_REQUESTED
+
+# mov x2,#0; nop; mov x2,#0x20; b 0x4
+code = bytes.fromhex('020080d21f2003d5020480d2feffff17')
+emu = Hedgehog(HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM, cpu_type='cortex-a55')
+emu.mem_map(0, 0x1000)
+emu.mem_write(0, code)
+seen = []
+emu.qemu_connect_instruction_markers((4,), lambda pc: seen.append(pc) or True)
+emu.qemu_set_instruction_marker_aarch64_gpr_filter(4, 2, 0xf0, 0x20)
+result, _cpu_exit = emu.qemu_run(0)
+assert result == QEMU_HEDGEHOG_RUN_STOP_REQUESTED
+assert seen == [4]
+assert emu.reg_read(2, size=8) == 0x20
 emu.close()
 '''
     env = os.environ.copy()
@@ -912,6 +1233,7 @@ emu.qemu_set_pc(0)
 before = emu.qemu_arm_diagnostics()
 assert before['current_el'] == 1
 assert before['pc'] == 0
+assert before['tpidr_el1'] == 0
 assert before['generic_timer_count'] == 7
 assert len(before['generic_timer_cval']) == 7
 assert len(before['generic_timer_ctl']) == 7

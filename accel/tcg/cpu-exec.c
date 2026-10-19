@@ -334,6 +334,16 @@ static bool check_for_breakpoints_slow(CPUState *cpu, vaddr pc,
             }
 
             if (match_bp) {
+                if ((bp->flags & BP_HEDGEHOG_MARKER) &&
+                    hedgehog_exec_hook_consume_instruction_marker_resume(
+                        cpu, pc)) {
+                    continue;
+                }
+                if ((bp->flags & BP_HEDGEHOG_MARKER) &&
+                    hedgehog_exec_hook_instruction_marker_filtered_out(
+                        cpu, pc)) {
+                    continue;
+                }
                 cpu->exception_index = EXCP_DEBUG;
                 return true;
             }
@@ -736,7 +746,9 @@ static inline bool cpu_handle_exception(CPUState *cpu, int *excp)
                 cpu_set_pc(cpu, next_pc);
             }
             cpu->exception_index = -1;
-            *excp = EXCP_INTERRUPT;
+            /* A host-emulated instruction consumes one finite step. */
+            *excp = disposition == HEDGEHOG_INVALID_INSN_CONTINUE &&
+                cpu_single_stepping(cpu) ? EXCP_DEBUG : EXCP_INTERRUPT;
             return true;
         }
 

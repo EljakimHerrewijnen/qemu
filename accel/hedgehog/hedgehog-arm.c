@@ -8,6 +8,7 @@
 
 #include "qemu/atomic.h"
 #include "qemu/timer.h"
+#include "exec/cputlb.h"
 #include "system/cpu-timers.h"
 #include "hw/core/cpu.h"
 #include "target/arm/cpu.h"
@@ -335,7 +336,7 @@ static bool hedgehog_arm_apply_aarch64_reset_state(CPUState *cpu,
 }
 
 static bool hedgehog_arm_diagnostics(CPUState *cpu,
-                                     HedgehogArmDiagnostics *diagnostics,
+                                     HedgehogArmDiagnosticsV2 *diagnostics,
                                      Error **errp)
 {
     ARMCPU *arm_cpu;
@@ -350,32 +351,36 @@ static bool hedgehog_arm_diagnostics(CPUState *cpu,
     arm_cpu = ARM_CPU(cpu);
     env = &arm_cpu->env;
 
-    diagnostics->pc = is_a64(env) ? env->pc : env->regs[15];
-    diagnostics->pstate = pstate_read(env);
-    diagnostics->scr_el3 = env->cp15.scr_el3;
-    diagnostics->hcr_el2 = env->cp15.hcr_el2;
-    diagnostics->hcr_el2_eff = arm_hcr_el2_eff(env);
-    diagnostics->elr_el1 = env->elr_el[1];
-    diagnostics->elr_el2 = env->elr_el[2];
-    diagnostics->elr_el3 = env->elr_el[3];
-    diagnostics->spsr_el1 = env->banked_spsr[aarch64_banked_spsr_index(1)];
-    diagnostics->spsr_el2 = env->banked_spsr[aarch64_banked_spsr_index(2)];
-    diagnostics->spsr_el3 = env->banked_spsr[aarch64_banked_spsr_index(3)];
-    diagnostics->esr_el1 = env->cp15.esr_el[1];
-    diagnostics->esr_el2 = env->cp15.esr_el[2];
-    diagnostics->esr_el3 = env->cp15.esr_el[3];
-    diagnostics->far_el1 = env->cp15.far_el[1];
-    diagnostics->far_el2 = env->cp15.far_el[2];
-    diagnostics->far_el3 = env->cp15.far_el[3];
-    diagnostics->exception_syndrome = env->exception.syndrome;
-    diagnostics->exception_vaddress = env->exception.vaddress;
-    diagnostics->current_el = arm_current_el(env);
-    diagnostics->cpsr = cpsr_read(env);
-    diagnostics->interrupt_request = qatomic_read(&cpu->interrupt_request);
-    diagnostics->halted = cpu->halted;
-    diagnostics->exit_request = qatomic_read(&cpu->exit_request);
-    diagnostics->exception_target_el = env->exception.target_el;
-    diagnostics->exception_index = cpu->exception_index;
+    diagnostics->base.pc = is_a64(env) ? env->pc : env->regs[15];
+    diagnostics->base.pstate = pstate_read(env);
+    diagnostics->ttbr0_el1 = env->cp15.ttbr0_el[1];
+    diagnostics->ttbr1_el1 = env->cp15.ttbr1_el[1];
+    diagnostics->tcr_el1 = env->cp15.tcr_el[1];
+    diagnostics->sctlr_el1 = env->cp15.sctlr_el[1];
+    diagnostics->base.scr_el3 = env->cp15.scr_el3;
+    diagnostics->base.hcr_el2 = env->cp15.hcr_el2;
+    diagnostics->base.hcr_el2_eff = arm_hcr_el2_eff(env);
+    diagnostics->base.elr_el1 = env->elr_el[1];
+    diagnostics->base.elr_el2 = env->elr_el[2];
+    diagnostics->base.elr_el3 = env->elr_el[3];
+    diagnostics->base.spsr_el1 = env->banked_spsr[aarch64_banked_spsr_index(1)];
+    diagnostics->base.spsr_el2 = env->banked_spsr[aarch64_banked_spsr_index(2)];
+    diagnostics->base.spsr_el3 = env->banked_spsr[aarch64_banked_spsr_index(3)];
+    diagnostics->base.esr_el1 = env->cp15.esr_el[1];
+    diagnostics->base.esr_el2 = env->cp15.esr_el[2];
+    diagnostics->base.esr_el3 = env->cp15.esr_el[3];
+    diagnostics->base.far_el1 = env->cp15.far_el[1];
+    diagnostics->base.far_el2 = env->cp15.far_el[2];
+    diagnostics->base.far_el3 = env->cp15.far_el[3];
+    diagnostics->base.exception_syndrome = env->exception.syndrome;
+    diagnostics->base.exception_vaddress = env->exception.vaddress;
+    diagnostics->base.current_el = arm_current_el(env);
+    diagnostics->base.cpsr = cpsr_read(env);
+    diagnostics->base.interrupt_request = qatomic_read(&cpu->interrupt_request);
+    diagnostics->base.halted = cpu->halted;
+    diagnostics->base.exit_request = qatomic_read(&cpu->exit_request);
+    diagnostics->base.exception_target_el = env->exception.target_el;
+    diagnostics->base.exception_index = cpu->exception_index;
     /*
      * This is deliberately a state snapshot, not a timer service point:
      * reading the architectural counter and c14 records must neither recalc
@@ -383,18 +388,45 @@ static bool hedgehog_arm_diagnostics(CPUState *cpu,
      * ISTATUS bit in ctl bit 2; enabled and IMASK are ctl bits 0 and 1.
      */
     g_assert(NUM_GTIMERS == HEDGEHOG_ARM_GENERIC_TIMER_COUNT);
-    diagnostics->generic_timer_count = NUM_GTIMERS;
-    diagnostics->generic_timer_counter = gt_get_countervalue(env);
+    diagnostics->base.generic_timer_count = NUM_GTIMERS;
+    diagnostics->base.generic_timer_counter = gt_get_countervalue(env);
     for (timer_index = 0; timer_index < NUM_GTIMERS; timer_index++) {
         uint64_t ctl = env->cp15.c14_timer[timer_index].ctl;
 
-        diagnostics->generic_timer_cval[timer_index] =
+        diagnostics->base.generic_timer_cval[timer_index] =
             env->cp15.c14_timer[timer_index].cval;
-        diagnostics->generic_timer_ctl[timer_index] = ctl;
-        diagnostics->generic_timer_enabled[timer_index] = ctl & 1;
-        diagnostics->generic_timer_imask[timer_index] = (ctl >> 1) & 1;
-        diagnostics->generic_timer_istatus[timer_index] = (ctl >> 2) & 1;
+        diagnostics->base.generic_timer_ctl[timer_index] = ctl;
+        diagnostics->base.generic_timer_enabled[timer_index] = ctl & 1;
+        diagnostics->base.generic_timer_imask[timer_index] = (ctl >> 1) & 1;
+        diagnostics->base.generic_timer_istatus[timer_index] = (ctl >> 2) & 1;
     }
+    diagnostics->tpidr_el1 = env->cp15.tpidr_el[1];
+    diagnostics->vbar_el1 = env->cp15.vbar_el[1];
+    diagnostics->ttbr0_el2 = env->cp15.ttbr0_el[2];
+    diagnostics->tcr_el2 = env->cp15.tcr_el[2];
+    diagnostics->sctlr_el2 = env->cp15.sctlr_el[2];
+    diagnostics->vttbr_el2 = env->cp15.vttbr_el2;
+    diagnostics->vtcr_el2 = env->cp15.vtcr_el2;
+    diagnostics->vbar_el2 = env->cp15.vbar_el[2];
+    return true;
+}
+
+static bool hedgehog_arm_read_aarch64_gpr(CPUState *cpu, unsigned index,
+                                          uint64_t *value)
+{
+    ARMCPU *arm_cpu;
+    CPUARMState *env;
+
+    if (!object_dynamic_cast(OBJECT(cpu), TYPE_ARM_CPU) || !value ||
+        index >= 31) {
+        return false;
+    }
+    arm_cpu = ARM_CPU(cpu);
+    env = &arm_cpu->env;
+    if (!is_a64(env)) {
+        return false;
+    }
+    *value = env->xregs[index];
     return true;
 }
 
@@ -427,6 +459,54 @@ static bool hedgehog_arm_restore_generic_timers(
     return true;
 }
 
+static bool hedgehog_arm_restore_execution_state(
+    CPUState *cpu, const HedgehogArmExecutionState *state, Error **errp)
+{
+    ARMCPU *arm_cpu;
+    CPUARMState *env;
+
+    if (!object_dynamic_cast(OBJECT(cpu), TYPE_ARM_CPU) || !state) {
+        error_setg(errp, "ARM execution-state restore requires ARM CPU state");
+        return false;
+    }
+    arm_cpu = ARM_CPU(cpu);
+    env = &arm_cpu->env;
+    if (!is_a64(env)) {
+        error_setg(errp, "ARM execution-state restore requires AArch64 state");
+        return false;
+    }
+
+    env->cp15.ttbr0_el[1] = state->ttbr0_el1;
+    env->cp15.ttbr1_el[1] = state->ttbr1_el1;
+    env->cp15.tcr_el[1] = state->tcr_el1;
+    env->cp15.sctlr_el[1] = state->sctlr_el1;
+    env->cp15.scr_el3 = state->scr_el3;
+    env->cp15.hcr_el2 = state->hcr_el2;
+    env->elr_el[1] = state->elr_el1;
+    env->elr_el[2] = state->elr_el2;
+    env->elr_el[3] = state->elr_el3;
+    env->banked_spsr[aarch64_banked_spsr_index(1)] = state->spsr_el1;
+    env->banked_spsr[aarch64_banked_spsr_index(2)] = state->spsr_el2;
+    env->banked_spsr[aarch64_banked_spsr_index(3)] = state->spsr_el3;
+    env->cp15.esr_el[1] = state->esr_el1;
+    env->cp15.esr_el[2] = state->esr_el2;
+    env->cp15.esr_el[3] = state->esr_el3;
+    env->cp15.far_el[1] = state->far_el1;
+    env->cp15.far_el[2] = state->far_el2;
+    env->cp15.far_el[3] = state->far_el3;
+    env->cp15.tpidr_el[1] = state->tpidr_el1;
+    env->cp15.vbar_el[1] = state->vbar_el1;
+    env->cp15.ttbr0_el[2] = state->ttbr0_el2;
+    env->cp15.tcr_el[2] = state->tcr_el2;
+    env->cp15.sctlr_el[2] = state->sctlr_el2;
+    env->cp15.vttbr_el2 = state->vttbr_el2;
+    env->cp15.vtcr_el2 = state->vtcr_el2;
+    env->cp15.vbar_el[2] = state->vbar_el2;
+    arm_rebuild_hflags(env);
+    tlb_flush(CPU(arm_cpu));
+    return true;
+}
+
 const HedgehogArchOps *hedgehog_arch_ops(void)
 {
     static const HedgehogArchOps ops = {
@@ -437,6 +517,8 @@ const HedgehogArchOps *hedgehog_arch_ops(void)
         .release_cpu = hedgehog_arm_release_cpu,
         .arm_diagnostics = hedgehog_arm_diagnostics,
         .restore_arm_generic_timers = hedgehog_arm_restore_generic_timers,
+        .restore_arm_execution_state = hedgehog_arm_restore_execution_state,
+        .read_aarch64_gpr = hedgehog_arm_read_aarch64_gpr,
     };
 
     return &ops;

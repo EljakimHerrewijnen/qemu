@@ -34,6 +34,28 @@ typedef void hedgehog_set_invalid_insn_hook_sig(
     HedgehogBackend *uc,
     HedgehogInvalidInsnHookFunc hook_fn,
     void *opaque);
+typedef bool hedgehog_set_instruction_markers_sig(
+    HedgehogBackend *uc, const vaddr *markers, size_t marker_count,
+    HedgehogExecHookFunc hook_fn, void *opaque, Error **errp);
+typedef bool hedgehog_set_instruction_marker_aarch64_gpr_filter_sig(
+    HedgehogBackend *uc, vaddr marker, unsigned gpr_index, uint64_t mask,
+    uint64_t expected, Error **errp);
+typedef bool hedgehog_set_write_watchpoint_sig(
+    HedgehogBackend *uc, vaddr address, vaddr length,
+    HedgehogExecHookFunc hook_fn, void *opaque, Error **errp);
+typedef bool hedgehog_get_last_write_watchpoint_address_sig(
+    HedgehogBackend *uc, vaddr *address);
+typedef bool hedgehog_set_dirty_ram_tracking_sig(
+    HedgehogBackend *uc, bool enabled, Error **errp);
+typedef bool hedgehog_collect_dirty_ram_pages_sig(
+    HedgehogBackend *uc, hwaddr *pages, size_t capacity, size_t *count,
+    bool nonzero_only, bool clear, Error **errp);
+typedef bool hedgehog_arm_diagnostics_v2_sig(
+    HedgehogBackend *uc, HedgehogArmDiagnosticsV2 *diagnostics,
+    size_t diagnostics_size, Error **errp);
+typedef bool hedgehog_restore_arm_execution_state_sig(
+    HedgehogBackend *uc, const HedgehogArmExecutionState *state,
+    Error **errp);
 typedef bool hedgehog_set_invalid_mem_diagnostic_capture_sig(
     HedgehogBackend *uc, bool enabled, Error **errp);
 typedef bool hedgehog_get_last_invalid_mem_diagnostic_sig(
@@ -112,6 +134,38 @@ _Static_assert(__builtin_types_compatible_p(
                    hedgehog_set_invalid_insn_hook_sig),
                "hedgehog_backend_set_invalid_insn_hook signature mismatch");
 _Static_assert(__builtin_types_compatible_p(
+                   __typeof__(hedgehog_backend_set_instruction_markers),
+                   hedgehog_set_instruction_markers_sig),
+               "hedgehog_backend_set_instruction_markers signature mismatch");
+_Static_assert(__builtin_types_compatible_p(
+                   __typeof__(hedgehog_backend_set_instruction_marker_aarch64_gpr_filter),
+                   hedgehog_set_instruction_marker_aarch64_gpr_filter_sig),
+               "hedgehog_backend_set_instruction_marker_aarch64_gpr_filter signature mismatch");
+_Static_assert(__builtin_types_compatible_p(
+                   __typeof__(hedgehog_backend_set_write_watchpoint),
+                   hedgehog_set_write_watchpoint_sig),
+               "hedgehog_backend_set_write_watchpoint signature mismatch");
+_Static_assert(__builtin_types_compatible_p(
+                   __typeof__(hedgehog_backend_get_last_write_watchpoint_address),
+                   hedgehog_get_last_write_watchpoint_address_sig),
+               "hedgehog_backend_get_last_write_watchpoint_address signature mismatch");
+_Static_assert(__builtin_types_compatible_p(
+                   __typeof__(hedgehog_backend_set_dirty_ram_tracking),
+                   hedgehog_set_dirty_ram_tracking_sig),
+               "hedgehog_backend_set_dirty_ram_tracking signature mismatch");
+_Static_assert(__builtin_types_compatible_p(
+                   __typeof__(hedgehog_backend_collect_dirty_ram_pages),
+                   hedgehog_collect_dirty_ram_pages_sig),
+               "hedgehog_backend_collect_dirty_ram_pages signature mismatch");
+_Static_assert(__builtin_types_compatible_p(
+                   __typeof__(hedgehog_backend_arm_diagnostics_v2),
+                   hedgehog_arm_diagnostics_v2_sig),
+               "hedgehog_backend_arm_diagnostics_v2 signature mismatch");
+_Static_assert(__builtin_types_compatible_p(
+                   __typeof__(hedgehog_backend_restore_arm_execution_state),
+                   hedgehog_restore_arm_execution_state_sig),
+               "hedgehog_backend_restore_arm_execution_state signature mismatch");
+_Static_assert(__builtin_types_compatible_p(
                    __typeof__(hedgehog_backend_set_invalid_mem_diagnostic_capture),
                    hedgehog_set_invalid_mem_diagnostic_capture_sig),
                "hedgehog_backend_set_invalid_mem_diagnostic_capture signature mismatch");
@@ -153,8 +207,13 @@ _Static_assert(__builtin_types_compatible_p(
                "hedgehog_backend_request_cpu_reset signature mismatch");
 _Static_assert(offsetof(HedgehogArmDiagnostics, pc) == 0,
                "HedgehogArmDiagnostics.pc must stay first");
-_Static_assert(sizeof(HedgehogArmDiagnostics) >= 392,
-               "HedgehogArmDiagnostics unexpectedly small");
+_Static_assert(sizeof(HedgehogArmDiagnostics) == 392,
+               "legacy HedgehogArmDiagnostics size must remain stable");
+_Static_assert(offsetof(HedgehogArmDiagnostics, scr_el3) == 16,
+               "legacy HedgehogArmDiagnostics offsets must remain stable");
+_Static_assert(offsetof(HedgehogArmDiagnosticsV2, ttbr0_el1) ==
+               sizeof(HedgehogArmDiagnostics),
+               "extended diagnostics must append to the legacy structure");
 _Static_assert(offsetof(HedgehogArmDiagnostics, generic_timer_counter) >
                offsetof(HedgehogArmDiagnostics, exception_index),
                "generic timer diagnostics must append to CPU diagnostics");

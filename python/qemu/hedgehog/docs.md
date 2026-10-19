@@ -234,7 +234,9 @@ undefined-instruction behavior. Keep board- and product-specific register
 profiles in the embedding application rather than in this generic API.
 
 `qemu_arm_diagnostics()` returns read-only ARM CPU state useful for firmware
-frontier debugging. The dictionary includes `pc`, `pstate`, `current_el`,
+frontier debugging. The dictionary includes `pc`, `pstate`, `ttbr0_el1`,
+`ttbr1_el1`, `tcr_el1`, `sctlr_el1`, `tpidr_el1`, `vbar_el1`,
+`ttbr0_el2`, `tcr_el2`, `sctlr_el2`, `vttbr_el2`, `vtcr_el2`, `vbar_el2`, `current_el`,
 `scr_el3`, `hcr_el2`, `hcr_el2_eff`, `elr_el1..3`, `spsr_el1..3`,
 `esr_el1..3`, `far_el1..3`, `exception_syndrome`, `exception_vaddress`,
 `exception_target_el`, `exception_index`, and CPU run/stop flags. It also
@@ -245,6 +247,11 @@ index-aligned `generic_timer_cval`, `generic_timer_ctl`,
 physical EL1, virtual EL1, EL2 physical, EL3 physical, EL2 virtual, secure-EL2
 physical, secure-EL2 virtual. Reading the record does not service a timer,
 modify a deadline, drive an output, or inject an interrupt.
+
+The extended fields use the size-checked C entry point
+`hedgehog_backend_arm_diagnostics_v2`; the original C diagnostics layout and
+entry point remain unchanged. When loading an older backend, the Python helper
+omits unavailable extended fields.
 
 ### Invalid-memory diagnostic capture
 
@@ -346,12 +353,10 @@ Fixed-rate instruction-counted time, deterministic idle advancement, and clock
 state capture/restore require separate APIs and are not provided by this change.
 External host wall-clock timeouts remain independent of guest time.
 
-The direct runner does not currently pump QEMU virtual timer lists. The
-`qemu_events_poll()` helper iterates GLib sources and is not a replacement for
-that timer dispatch: a future AArch64 physical-timer deadline can pass during
-direct execution without updating `CNTP_CTL_EL0.ISTATUS`. This existing timer
-integration gap is separate from pause-clock ownership and from the explicit
-standalone hard-interrupt input API. Freezing host pauses does not repair it.
+Standalone direct execution services QEMU timer queues during active runs and
+architectural waits, as described under "Standalone timer dispatch and idle
+execution" below. Timer expiration updates architectural status; CPU output
+connections and the embedding interrupt-controller model determine IRQ delivery.
 
 Use `qemu_run` directly when you need to inspect or react to
 `QEMU_HEDGEHOG_RUN_HALTED`. For example, Arm64 firmware that idles with `WFI`
@@ -537,6 +542,47 @@ Hook return behavior:
   access, or `False` to let the backend stop with an invalid-memory result.
 - Invalid-instruction hooks: return `True` to advance, an integer to choose the
   next PC, or `False`/`None` to preserve normal exception delivery.
+
+For a small, fixed set of setup-time instruction observations, use
+`qemu_connect_instruction_markers(addresses, callback)`. It reaches each
+listed PC exactly without installing `HEDGEHOG_HOOK_CODE` globally or changing
+guest memory/control flow. The callback runs outside QEMU's BQL and returns
+`True` only to stop the run. Markers must be configured before execution.
+`qemu_set_instruction_marker_aarch64_gpr_filter(address, gpr_index, mask,
+expected)` can restrict any installed AArch64 marker independently; setting a
+filter again for the same marker replaces that marker's filter only.
+Nonmatching filters stay in native execution and do not enter Python. With no
+markers installed, the native execution path retains its ordinary breakpoint
+checks; these observers do not enable a global instruction callback.
+
+For one fixed virtual-memory write range, use
+`qemu_connect_write_watchpoint(address, length, callback)`. It uses QEMU's
+native virtual watchpoint path: it does not replace or remap RAM, and the
+callback runs outside QEMU's BQL at the post-access debug boundary. The
+callback receives that boundary's architectural PC and returns `True` only to
+stop the run. Configure it before execution. Call
+`qemu_last_write_watchpoint_address()` from the callback or after the run to
+retrieve the exact virtual address that caused the most recent watchpoint hit.
+
+Standalone RAM write logging is disabled by default. Enable it before execution
+with `qemu_set_dirty_ram_tracking(True)` when native write capture is needed.
+Tracked RAM mappings must have 4 KiB-aligned bases and sizes. After `qemu_run()`
+returns, `qemu_collect_dirty_ram_pages(clear=True, nonzero_only=False)` returns
+the 4 KiB-aligned physical pages changed since the last clearing collection.
+It includes native stores and host API writes; it installs no Python memory
+callback. `clear=False` observes the current epoch without clearing it.
+`nonzero_only=True` omits pages whose entire current contents are zero while
+still clearing their dirty entries when `clear=True`; this option is useful
+only when the caller's restore policy recreates omitted pages as zero.
+
+`qemu_restore_arm_execution_state(state)` restores the AArch64 translation,
+exception return, and thread/vector fields named by `HedgehogArmExecutionState`
+from a prior diagnostics capture. The caller must use the same CPU
+configuration and restore general registers, PC, PSTATE, RAM, timers, and
+device state separately. This is a partial CPU context primitive. Dirty-page
+collection and execution-state restore require a standalone CPU outside any
+active `qemu_run()`, including its observation callbacks; board-backed and
+running CPUs are rejected.
 
 For this phase, mem read/write hooks are emitted for explicit Python API memory
 operations (`mem_read` / `mem_write`). Full guest-memory-access tracing across

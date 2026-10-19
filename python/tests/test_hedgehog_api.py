@@ -67,6 +67,11 @@ class FakeBackend:
 
         self.tb_hook: Optional[Callable[[int], bool]] = None
         self.insn_hook: Optional[Callable[[int], bool]] = None
+        self.instruction_markers: Tuple[int, ...] = ()
+        self.instruction_marker_hook: Optional[Callable[[int], bool]] = None
+        self.instruction_marker_aarch64_gpr_filters: Dict[int, Tuple[int, int, int]] = {}
+        self.write_watchpoint: Optional[Tuple[int, int]] = None
+        self.write_watchpoint_hook: Optional[Callable[[int], bool]] = None
         self.invalid_insn_hook: Optional[
             Callable[[int, bytes, int, int, int], Tuple[int, int]]
         ] = None
@@ -148,6 +153,50 @@ class FakeBackend:
     def set_insn_hook(self, callback: Optional[Callable[[int], bool]]) -> None:
         self.insn_hook = callback
 
+    def set_instruction_markers(
+        self,
+        addresses: Tuple[int, ...],
+        callback: Optional[Callable[[int], bool]],
+    ) -> bool:
+        self.instruction_markers = tuple(addresses)
+        self.instruction_marker_hook = callback
+        return True
+
+    def set_instruction_marker_aarch64_gpr_filter(
+        self, address: int, gpr_index: int, mask: int, expected: int,
+    ) -> bool:
+        self.instruction_marker_aarch64_gpr_filters[address] = (
+            gpr_index, mask, expected,
+        )
+        return True
+
+    def set_write_watchpoint(
+        self,
+        address: int,
+        length: int,
+        callback: Optional[Callable[[int], bool]],
+    ) -> bool:
+        self.write_watchpoint = (address, length)
+        self.write_watchpoint_hook = callback
+        return True
+
+    def get_last_write_watchpoint_address(self) -> Optional[int]:
+        return getattr(self, 'last_write_watchpoint_address', None)
+
+    def set_dirty_ram_tracking(self, enabled: bool) -> bool:
+        self.dirty_ram_tracking = enabled
+        return True
+
+    def collect_dirty_ram_pages(
+        self, *, nonzero_only: bool = False, clear: bool = True,
+    ) -> Tuple[int, ...]:
+        self.dirty_ram_options = (nonzero_only, clear)
+        return (0x2000,)
+
+    def restore_arm_execution_state(self, state: Dict[str, int]) -> bool:
+        self.restored_arm_execution_state = dict(state)
+        return True
+
     def set_invalid_insn_hook(
         self,
         callback: Optional[Callable[[int, bytes, int, int, int], Tuple[int, int]]],
@@ -213,6 +262,10 @@ class FakeBackend:
         if should_exec_sequence:
             for pc in self.exec_sequence:
                 if self.tb_hook is not None and self.tb_hook(pc):
+                    return QEMU_HEDGEHOG_RUN_STOP_REQUESTED, 0
+                if (pc in self.instruction_markers and
+                        self.instruction_marker_hook is not None and
+                        self.instruction_marker_hook(pc)):
                     return QEMU_HEDGEHOG_RUN_STOP_REQUESTED, 0
                 if self.insn_hook is not None and self.insn_hook(pc):
                     return QEMU_HEDGEHOG_RUN_STOP_REQUESTED, 0
@@ -328,6 +381,72 @@ def test_mem_map_read_write_roundtrip() -> None:
     uc.mem_write(0x1010, b'QEMU')
 
     assert uc.mem_read(0x1010, 4) == b'QEMU'
+
+
+def test_setup_instruction_marker_observes_only_its_exact_pc() -> None:
+    backend = FakeBackend()
+    backend.exec_sequence = [0x1000, 0x1004, 0x1008]
+    uc = Hedgehog(HEDGEHOG_ARCH_X86, HEDGEHOG_MODE_64, backend=backend)
+    observed: List[int] = []
+
+    uc.qemu_connect_instruction_markers((0x1004,), lambda pc: observed.append(pc) or False)
+    uc.qemu_run(0)
+
+    assert backend.instruction_markers == (0x1004,)
+    assert backend.insn_hook is None
+    assert observed == [0x1004]
+
+
+def test_setup_instruction_marker_can_use_native_aarch64_gpr_filter() -> None:
+    backend = FakeBackend()
+    uc = Hedgehog(HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM, backend=backend)
+
+    uc.qemu_connect_instruction_markers((0x1004,), lambda _pc: True)
+    uc.qemu_set_instruction_marker_aarch64_gpr_filter(0x1004, 2, 0xF0, 0x20)
+
+    assert backend.instruction_marker_aarch64_gpr_filters == {0x1004: (2, 0xF0, 0x20)}
+
+
+def test_setup_instruction_markers_keep_independent_native_aarch64_gpr_filters() -> None:
+    backend = FakeBackend()
+    uc = Hedgehog(HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM, backend=backend)
+
+    uc.qemu_connect_instruction_markers((0x1004, 0x1008), lambda _pc: True)
+    uc.qemu_set_instruction_marker_aarch64_gpr_filter(0x1004, 3, 0xF, 0x2)
+    uc.qemu_set_instruction_marker_aarch64_gpr_filter(0x1008, 4, 0x3, 0x1)
+    uc.qemu_set_instruction_marker_aarch64_gpr_filter(0x1004, 3, 0xF, 0x6)
+
+    assert backend.instruction_marker_aarch64_gpr_filters == {
+        0x1004: (3, 0xF, 0x6),
+        0x1008: (4, 0x3, 0x1),
+    }
+
+
+def test_setup_write_watchpoint_is_registered_without_memory_remapping() -> None:
+    backend = FakeBackend()
+    uc = Hedgehog(HEDGEHOG_ARCH_X86, HEDGEHOG_MODE_64, backend=backend)
+
+    uc.qemu_connect_write_watchpoint(0x2000, 8, lambda _pc: False)
+
+    assert backend.write_watchpoint == (0x2000, 8)
+    assert backend.write_watchpoint_hook is not None
+
+
+def test_last_write_watchpoint_address_is_exposed() -> None:
+    backend = FakeBackend()
+    backend.last_write_watchpoint_address = 0x2004
+    uc = Hedgehog(HEDGEHOG_ARCH_X86, HEDGEHOG_MODE_64, backend=backend)
+
+    assert uc.qemu_last_write_watchpoint_address() == 0x2004
+
+
+def test_dirty_ram_tracking_and_collection_preserve_caller_options() -> None:
+    backend = FakeBackend()
+    uc = Hedgehog(HEDGEHOG_ARCH_ARM64, HEDGEHOG_MODE_ARM, backend=backend)
+    uc.qemu_set_dirty_ram_tracking()
+    assert backend.dirty_ram_tracking
+    assert uc.qemu_collect_dirty_ram_pages(nonzero_only=True, clear=False) == (0x2000,)
+    assert backend.dirty_ram_options == (True, False)
 
 
 def test_mem_map_ptr_registers_caller_owned_ram() -> None:
@@ -870,6 +989,8 @@ def _make_fake_native_library() -> SimpleNamespace:
         hedgehog_backend_reg_write=_FakeNativeFunction(-1),
         hedgehog_backend_set_tb_hook=_FakeNativeFunction(None),
         hedgehog_backend_set_insn_hook=_FakeNativeFunction(None),
+        hedgehog_backend_set_instruction_markers=_FakeNativeFunction(True),
+        hedgehog_backend_set_instruction_marker_aarch64_gpr_filter=_FakeNativeFunction(True),
         hedgehog_backend_set_invalid_insn_hook=_FakeNativeFunction(None),
         hedgehog_backend_set_invalid_mem_hook=_FakeNativeFunction(None),
         hedgehog_backend_set_invalid_mem_diagnostic_capture=_FakeNativeFunction(True),
@@ -918,6 +1039,15 @@ def test_configure_library_api_configures_stop_signature() -> None:
     assert fake_lib.hedgehog_backend_set_aarch64_reset_state.restype is ctypes.c_bool
     assert fake_lib.hedgehog_backend_add_aarch64_cp_reg.restype is ctypes.c_bool
     assert fake_lib.hedgehog_backend_set_aarch64_cp_reg_value.restype is ctypes.c_bool
+    assert fake_lib.hedgehog_backend_set_instruction_marker_aarch64_gpr_filter.argtypes == [
+        ctypes.c_void_p,
+        ctypes.c_uint64,
+        ctypes.c_uint,
+        ctypes.c_uint64,
+        ctypes.c_uint64,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    assert fake_lib.hedgehog_backend_set_instruction_marker_aarch64_gpr_filter.restype is ctypes.c_bool
     assert fake_lib.hedgehog_backend_connect_cpu_wait_observer.restype is ctypes.c_bool
     assert fake_lib.hedgehog_backend_connect_cpu_reset_observer.restype is ctypes.c_bool
     assert fake_lib.hedgehog_backend_request_cpu_reset.restype is ctypes.c_bool
@@ -1004,6 +1134,7 @@ def test_arm_diagnostics_returns_extended_native_fields() -> None:
         'generic_timer_enabled': [1, 0, 0, 1, 0, 0, 0],
         'generic_timer_imask': [0, 0, 0, 1, 0, 0, 0],
         'generic_timer_istatus': [1, 0, 0, 0, 0, 0, 0],
+        'tpidr_el1': 0x40000,
     }
     backend = FakeBackend()
     backend.arm_diagnostics = lambda: backend_diagnostics  # type: ignore[method-assign]
@@ -1011,6 +1142,32 @@ def test_arm_diagnostics_returns_extended_native_fields() -> None:
 
     assert uc.qemu_arm_diagnostics() == backend_diagnostics
     uc.close()
+
+
+def test_legacy_arm_diagnostics_omit_unavailable_extended_state() -> None:
+    fake_lib = _make_fake_native_library()
+    fake_lib.hedgehog_backend_arm_diagnostics = _FakeNativeFunction(True)
+    backend = NativeBackend(fake_lib, 0x1234)
+    diagnostics = backend.arm_diagnostics()
+    assert diagnostics['pc'] == 0
+    assert 'ttbr0_el1' not in diagnostics
+    assert 'sctlr_el1' not in diagnostics
+    assert 'tpidr_el1' not in diagnostics
+    backend.close()
+
+
+@pytest.mark.parametrize('value', [-1, 1 << 64, True])
+def test_restore_execution_state_rejects_values_outside_uint64(value: int) -> None:
+    from qemu.hedgehog.backend import _ArmExecutionState
+    fake_lib = _make_fake_native_library()
+    fake_lib.hedgehog_backend_restore_arm_execution_state = _FakeNativeFunction(True)
+    backend = NativeBackend(fake_lib, 0x1234)
+    state = {name: 0 for name, _ctype in _ArmExecutionState._fields_}
+    state['tpidr_el1'] = value
+    with pytest.raises(ValueError, match='tpidr_el1 is invalid'):
+        backend.restore_arm_execution_state(state)
+    assert not fake_lib.hedgehog_backend_restore_arm_execution_state.calls
+    backend.close()
 
 
 def test_native_backend_rejects_second_process_local_create(

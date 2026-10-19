@@ -130,6 +130,45 @@ typedef void (*HedgehogMMIOWriteFunc)(void *opaque, hwaddr addr,
 typedef bool (*HedgehogExecHookFunc)(HedgehogBackend *uc, vaddr pc,
                                     void *opaque);
 
+/*
+ * Observe writes to one fixed virtual-memory range without changing its
+ * MemoryRegion or guest mappings.  The callback runs on the direct-run caller
+ * after QEMU reaches its post-access debug boundary; @pc is that boundary's
+ * architectural PC.  Configure or clear this standalone observer before the
+ * first execution; pass length zero to clear it.
+ */
+bool hedgehog_backend_set_write_watchpoint(
+    HedgehogBackend *uc, vaddr address, vaddr length,
+    HedgehogExecHookFunc hook_fn, void *opaque, Error **errp);
+
+/*
+ * Return the exact virtual address from the most recent configured write
+ * watchpoint hit. The result is available only after a hit and is cleared
+ * when the observer is reconfigured or removed.
+ */
+bool hedgehog_backend_get_last_write_watchpoint_address(
+    HedgehogBackend *uc, vaddr *address);
+
+/* Opt in to standalone RAM write logging before the first execution. */
+bool hedgehog_backend_set_dirty_ram_tracking(
+    HedgehogBackend *uc, bool enabled, Error **errp);
+
+/*
+ * Enumerate standalone-RAM pages written by native guest execution since the
+ * previous successful clearing collection. Tracking must first be enabled.
+ * ``pages == NULL`` with ``clear == false`` is a non-mutating sizing query;
+ * otherwise ``capacity`` must accommodate the
+ * complete result.  Page addresses are 4 KiB-aligned guest physical snapshot
+ * pages, independent of QEMU's target-internal dirty bitmap granularity.
+ * With @nonzero_only, all dirty entries are still cleared
+ * but only pages whose current contents differ from reset-zero are returned;
+ * this keeps sparse reset-based snapshots bounded.  This is intentionally a
+ * stopped-CPU snapshot primitive, not a live memory observer.
+ */
+bool hedgehog_backend_collect_dirty_ram_pages(
+    HedgehogBackend *uc, hwaddr *pages, size_t capacity, size_t *count,
+    bool nonzero_only, bool clear, Error **errp);
+
 #define HEDGEHOG_INVALID_INSN_MAX_BYTES 16
 
 typedef struct HedgehogInvalidInsnInfo {
@@ -225,6 +264,27 @@ typedef struct HedgehogArmDiagnostics {
     uint32_t generic_timer_istatus[HEDGEHOG_ARM_GENERIC_TIMER_COUNT];
 } HedgehogArmDiagnostics;
 
+/* Keep the original diagnostics structure and entry point ABI unchanged. */
+typedef struct HedgehogArmDiagnosticsV2 {
+    HedgehogArmDiagnostics base;
+    /* Read-only translation configuration for stopped guest inspection. */
+    uint64_t ttbr0_el1;
+    uint64_t ttbr1_el1;
+    uint64_t tcr_el1;
+    uint64_t sctlr_el1;
+    /* Read-only architectural per-CPU/thread offset at EL1. */
+    uint64_t tpidr_el1;
+    /* EL1 exception-vector base needed to resume pending synchronous faults. */
+    uint64_t vbar_el1;
+    /* EL2 translation state required when HCR_EL2 enables stage 2. */
+    uint64_t ttbr0_el2;
+    uint64_t tcr_el2;
+    uint64_t sctlr_el2;
+    uint64_t vttbr_el2;
+    uint64_t vtcr_el2;
+    uint64_t vbar_el2;
+} HedgehogArmDiagnosticsV2;
+
 /*
  * Restorable generic-timer state. The virtual clock is captured separately
  * from the visible tick counter so its sub-tick phase is retained. Timer
@@ -235,6 +295,40 @@ typedef struct HedgehogArmGenericTimerState {
     uint64_t generic_timer_cval[HEDGEHOG_ARM_GENERIC_TIMER_COUNT];
     uint64_t generic_timer_ctl[HEDGEHOG_ARM_GENERIC_TIMER_COUNT];
 } HedgehogArmGenericTimerState;
+
+/*
+ * Architectural state required to resume a stopped AArch64 translation
+ * context.  This deliberately excludes transient exception bookkeeping and
+ * general-purpose registers, which the embedding API restores separately.
+ */
+typedef struct HedgehogArmExecutionState {
+    uint64_t ttbr0_el1;
+    uint64_t ttbr1_el1;
+    uint64_t tcr_el1;
+    uint64_t sctlr_el1;
+    uint64_t scr_el3;
+    uint64_t hcr_el2;
+    uint64_t elr_el1;
+    uint64_t elr_el2;
+    uint64_t elr_el3;
+    uint64_t spsr_el1;
+    uint64_t spsr_el2;
+    uint64_t spsr_el3;
+    uint64_t esr_el1;
+    uint64_t esr_el2;
+    uint64_t esr_el3;
+    uint64_t far_el1;
+    uint64_t far_el2;
+    uint64_t far_el3;
+    uint64_t tpidr_el1;
+    uint64_t vbar_el1;
+    uint64_t ttbr0_el2;
+    uint64_t tcr_el2;
+    uint64_t sctlr_el2;
+    uint64_t vttbr_el2;
+    uint64_t vtcr_el2;
+    uint64_t vbar_el2;
+} HedgehogArmExecutionState;
 
 typedef enum HedgehogRunResult {
     HEDGEHOG_RUN_BUDGET_EXHAUSTED = 0,
@@ -298,6 +392,27 @@ void hedgehog_backend_set_tb_hook(HedgehogBackend *uc,
 void hedgehog_backend_set_insn_hook(HedgehogBackend *uc,
                                    HedgehogExecHookFunc hook_fn,
                                    void *opaque);
+/*
+ * Observe a fixed set of instruction addresses without enabling global
+ * single-step mode.  Markers are setup-only standalone observations: QEMU
+ * stops at the exact instruction boundary, calls hook_fn on the direct-run
+ * caller, then resumes the unchanged guest instruction stream.
+ */
+bool hedgehog_backend_set_instruction_markers(
+    HedgehogBackend *uc, const vaddr *markers, size_t marker_count,
+    HedgehogExecHookFunc hook_fn, void *opaque, Error **errp);
+
+/*
+ * Restrict callbacks at an existing instruction marker to an AArch64 GPR
+ * bit-mask match.  Each marker retains its own filter; configuring the same
+ * marker again replaces only that marker's filter. This is host-only
+ * diagnostic filtering: non-matches resume the unchanged guest instruction
+ * and never enter the host callback. It must be configured before execution
+ * and the marker must already be installed.
+ */
+bool hedgehog_backend_set_instruction_marker_aarch64_gpr_filter(
+    HedgehogBackend *uc, vaddr marker, unsigned gpr_index, uint64_t mask,
+    uint64_t expected, Error **errp);
 void hedgehog_backend_set_invalid_insn_hook(
     HedgehogBackend *uc,
     HedgehogInvalidInsnHookFunc hook_fn,
@@ -356,8 +471,14 @@ bool hedgehog_backend_set_aarch64_cp_reg_value(HedgehogBackend *uc,
 bool hedgehog_backend_arm_diagnostics(HedgehogBackend *uc,
                                       HedgehogArmDiagnostics *diagnostics,
                                       Error **errp);
+bool hedgehog_backend_arm_diagnostics_v2(
+    HedgehogBackend *uc, HedgehogArmDiagnosticsV2 *diagnostics,
+    size_t diagnostics_size, Error **errp);
 bool hedgehog_backend_restore_arm_generic_timers(
     HedgehogBackend *uc, const HedgehogArmGenericTimerState *state,
+    Error **errp);
+bool hedgehog_backend_restore_arm_execution_state(
+    HedgehogBackend *uc, const HedgehogArmExecutionState *state,
     Error **errp);
 
 CPUState *hedgehog_backend_cpu(HedgehogBackend *uc);

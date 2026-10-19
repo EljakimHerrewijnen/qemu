@@ -24,6 +24,10 @@ typedef bool (*HedgehogInvalidInsnInfoFunc)(
     int exception_index,
     HedgehogInvalidInsnInfo *info);
 
+/* Returns true when an exact-PC marker can continue in native execution. */
+typedef bool (*HedgehogInstructionMarkerFilterFunc)(
+    HedgehogBackend *uc, CPUState *cpu, vaddr pc, void *opaque);
+
 void hedgehog_exec_hook_register_backend(CPUState *cpu, HedgehogBackend *uc,
                                         HedgehogExecStopFunc stop_fn,
                                         void *stop_opaque,
@@ -32,6 +36,16 @@ void hedgehog_exec_hook_unregister_backend(CPUState *cpu);
 
 void hedgehog_exec_hook_set_direct_run(CPUState *cpu, bool active);
 bool hedgehog_exec_hook_direct_run_active(CPUState *cpu);
+
+/* Consume the one resume pass after a Hedgehog instruction marker fired. */
+bool hedgehog_exec_hook_consume_instruction_marker_resume(CPUState *cpu,
+                                                          vaddr pc);
+void hedgehog_exec_hook_resume_instruction_marker(CPUState *cpu, vaddr pc);
+void hedgehog_exec_hook_set_instruction_marker_filter(
+    HedgehogBackend *uc, HedgehogInstructionMarkerFilterFunc filter_fn,
+    void *opaque);
+bool hedgehog_exec_hook_instruction_marker_filtered_out(CPUState *cpu,
+                                                         vaddr pc);
 
 void hedgehog_exec_hook_set_tb(HedgehogBackend *uc,
                               HedgehogExecHookFunc hook_fn,
